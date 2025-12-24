@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quantum Data Center Control</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <h1>⚛️ Quantum Data Center Control</h1>
+                <p class="subtitle">Real-time Optimization & Monitoring</p>
+            </div>
+            <div class="status-badge">
+                <span id="connection-status" class="badge badge-disconnected">Disconnected</span>
+                <span id="simulation-status" class="badge badge-stopped">Stopped</span>
+            </div>
+        </header>
+
+        <!-- Control Panel -->
+        <div class="control-panel">
+            <div class="control-group">
+                <h3>Simulation Control</h3>
+                <button id="btn-start" class="btn btn-primary">▶ Start</button>
+                <button id="btn-stop" class="btn btn-secondary">⏸ Stop</button>
+                <button id="btn-reset" class="btn btn-danger">⟲ Reset</button>
+            </div>
+
+            <div class="control-group">
+                <h3>Optimization Mode</h3>
+                <select id="optimization-mode" class="select">
+                    <option value="qaoa">QAOA (Task Allocation)</option>
+                    <option value="vqe">VQE (Workload Scheduling)</option>
+                    <option value="cooling">QUBO (Cooling)</option>
+                    <option value="auto">Auto (All)</option>
+                    <option value="none">None (Manual)</option>
+                </select>
+                <button id="btn-optimize" class="btn btn-accent">⚡ Optimize Now</button>
+            </div>
+
+            <div class="control-group">
+                <h3>Current Time</h3>
+                <div class="time-display">
+                    <div class="time-value">
+                        <span id="current-hour">00</span>:00
+                    </div>
+                    <div class="time-label">Hour <span id="current-time">0</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Key Metrics Dashboard -->
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-icon">⚡</div>
+                <div class="metric-content">
+                    <div class="metric-label">Total Energy</div>
+                    <div class="metric-value" id="metric-energy">0 kWh</div>
+                    <div class="metric-trend" id="trend-energy">--</div>
+                </div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-icon">💰</div>
+                <div class="metric-content">
+                    <div class="metric-label">Cost per Hour</div>
+                    <div class="metric-value" id="metric-cost">$0.00</div>
+                    <div class="metric-trend" id="trend-cost">--</div>
+                </div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-icon">🌡️</div>
+                <div class="metric-content">
+                    <div class="metric-label">Avg Temperature</div>
+                    <div class="metric-value" id="metric-temp">22°C</div>
+                    <div class="metric-trend" id="trend-temp">--</div>
+                </div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-icon">🌱</div>
+                <div class="metric-content">
+                    <div class="metric-label">Carbon Emissions</div>
+                    <div class="metric-value" id="metric-carbon">0 g CO₂</div>
+                    <div class="metric-trend" id="trend-carbon">--</div>
+                </div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-icon">🖥️</div>
+                <div class="metric-content">
+                    <div class="metric-label">Server Utilization</div>
+                    <div class="metric-value" id="metric-utilization">0%</div>
+                    <div class="metric-trend" id="trend-utilization">--</div>
+                </div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-icon">⚛️</div>
+                <div class="metric-content">
+                    <div class="metric-label">Optimizations</div>
+                    <div class="metric-value" id="metric-optimizations">0</div>
+                    <div class="metric-trend" id="trend-optimizations">Quantum</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Visualization Section -->
+        <div class="visualization-grid">
+            <!-- Server Rack Visualization -->
+            <div class="viz-card">
+                <h3>Server Rack Status</h3>
+                <div id="server-rack" class="server-rack"></div>
+            </div>
+
+            <!-- Task Queue -->
+            <div class="viz-card">
+                <h3>Task Queue</h3>
+                <div id="task-queue" class="task-queue"></div>
+            </div>
+
+            <!-- Energy Chart -->
+            <div class="viz-card viz-card-wide">
+                <h3>Energy & Cost Forecast (24h)</h3>
+                <canvas id="energy-chart"></canvas>
+            </div>
+
+            <!-- Temperature & Carbon -->
+            <div class="viz-card viz-card-wide">
+                <h3>Temperature & Carbon Intensity</h3>
+                <canvas id="environment-chart"></canvas>
+            </div>
+
+            <!-- Server Load Distribution -->
+            <div class="viz-card">
+                <h3>Server Load Distribution</h3>
+                <canvas id="load-chart"></canvas>
+            </div>
+
+            <!-- Event Log -->
+            <div class="viz-card">
+                <h3>Event Log</h3>
+                <div id="event-log" class="event-log"></div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>Powered by Qiskit Quantum Computing & FastAPI | Real-time Data Center Optimization</p>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

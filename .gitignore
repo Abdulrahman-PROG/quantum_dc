@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Documentation (internal)
+DEPLOYMENT_SUCCESS.md
+SIMULATION_FIX.md
+WEB_APP_GUIDE.md
+ARCHITECTURE.md
+QUICKSTART.md
+STRUCTURE.md
+
+# Backup files
+*_backup.py
+*_simple.py
+test_*.py
+
+# Temporary
+/tmp/
+*.tmp
