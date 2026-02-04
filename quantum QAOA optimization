@@ -1,0 +1,254 @@
+"""
+FastAPI Backend for Quantum + AI Data Center Optimization
+Real-time monitoring and control interface
+(QAOA + AI Prediction + Anomaly Detection)
+"""
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional
+import asyncio
+import numpy as np
+from datetime import datetime
+
+# =========================
+# Quantum + AI Imports
+# =========================
+from sklearn.linear_model import LinearRegression
+
+from qiskit_optimization import QuadraticProgram
+from qiskit_optimization.algorithms import MinimumEigenOptimizer
+from qiskit_algorithms import QAOA
+from qiskit_algorithms.optimizers import COBYLA
+from qiskit_aer.primitives import Sampler
+
+# =========================
+# FastAPI App
+# =========================
+app = FastAPI(title="Quantum AI Data Center Control", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# =========================
+# AI Load Predictor
+# =========================
+class LoadPredictor:
+    def __init__(self):
+        self.model = LinearRegression()
+        self.trained = False
+
+    def update(self, history):
+        if len(history) < 5:
+            return
+        X = np.arange(len(history)).reshape(-1, 1)
+        y = np.array(history)
+        self.model.fit(X, y)
+        self.trained = True
+
+    def predict(self, step, fallback):
+        if not self.trained:
+            return fallback
+        return max(self.model.predict([[step]])[0], fallback)
+
+# =========================
+# Anomaly Detector
+# =========================
+class AnomalyDetector:
+    def __init__(self, threshold=3.0):
+        self.history = []
+        self.threshold = threshold
+
+    def update(self, value):
+        self.history.append(value)
+        if len(self.history) < 10:
+            return False
+        mean = np.mean(self.history)
+        std = np.std(self.history) + 1e-6
+        return abs((value - mean) / std) > self.threshold
+
+# =========================
+# QAOA Optimizer
+# =========================
+class QAOATaskAllocator:
+    def __init__(self, reps=1):
+        self.qaoa = QAOA(
+            sampler=Sampler(),
+            optimizer=COBYLA(),
+            reps=reps
+        )
+        self.optimizer = MinimumEigenOptimizer(self.qaoa)
+
+    def optimize(self, task_loads, server_caps):
+        qp = QuadraticProgram()
+        n_tasks = len(task_loads)
+        n_servers = len(server_caps)
+
+        for i in range(n_tasks):
+            for j in range(n_servers):
+                qp.binary_var(f"x_{i}_{j}")
+
+        for i in range(n_tasks):
+            qp.linear_constraint(
+                linear={f"x_{i}_{j}": 1 for j in range(n_servers)},
+                sense="==",
+                rhs=1
+            )
+
+        objective = {}
+        for i, load in enumerate(task_loads):
+            for j, cap in enumerate(server_caps):
+                objective[f"x_{i}_{j}"] = load / cap
+
+        qp.minimize(linear=objective)
+        result = self.optimizer.solve(qp)
+
+        allocation = []
+        for i in range(n_tasks):
+            for j in range(n_servers):
+                if result.variables_dict.get(f"x_{i}_{j}", 0) == 1:
+                    allocation.append(j)
+
+        return allocation
+
+# =========================
+# Data Center State
+# =========================
+class DataCenterState:
+    def __init__(self):
+        self.running = False
+        self.current_time = 0
+
+        self.servers = [
+            {"capacity": 8},
+            {"capacity": 6},
+            {"capacity": 4}
+        ]
+
+        self.tasks = [
+            {"cpu": 2},
+            {"cpu": 3},
+            {"cpu": 1},
+            {"cpu": 4}
+        ]
+
+        self.current_allocation = [0 for _ in self.tasks]
+
+        self.metrics = {
+            "energy": 0.0,
+            "server_utilization": 0.0,
+            "anomalies": 0
+        }
+
+        self.cpu_history = []
+
+        self.predictor = LoadPredictor()
+        self.anomaly_detector = AnomalyDetector()
+        self.qaoa = QAOATaskAllocator()
+
+    async def step(self):
+        self.current_time += 1
+
+        utilization = np.random.uniform(40, 90)
+        self.cpu_history.append(utilization)
+
+        self.predictor.update(self.cpu_history)
+
+        if self.anomaly_detector.update(utilization):
+            self.metrics["anomalies"] += 1
+
+        if self.current_time % 5 == 0:
+            self.run_qaoa()
+
+        self.metrics["server_utilization"] = utilization
+        self.metrics["energy"] = utilization * 0.15
+
+    def run_qaoa(self):
+        num_tasks = min(3, len(self.tasks))
+        num_servers = min(2, len(self.servers))
+
+        predicted_loads = []
+        for i in range(num_tasks):
+            base = self.tasks[i]["cpu"]
+            pred = self.predictor.predict(len(self.cpu_history) + i, base)
+            predicted_loads.append(pred)
+
+        server_caps = [s["capacity"] for s in self.servers[:num_servers]]
+
+        allocation = self.qaoa.optimize(predicted_loads, server_caps)
+
+        for i, s in enumerate(allocation):
+            self.current_allocation[i] = s
+
+# =========================
+# Global State
+# =========================
+state = DataCenterState()
+
+# =========================
+# API Models
+# =========================
+class OptimizeRequest(BaseModel):
+    method: str = "qaoa"
+
+# =========================
+# REST Endpoints
+# =========================
+@app.get("/api/status")
+async def status():
+    return {
+        "running": state.running,
+        "time": state.current_time,
+        "metrics": state.metrics,
+        "allocation": state.current_allocation
+    }
+
+@app.post("/api/simulation/start")
+async def start():
+    state.running = True
+    return {"status": "started"}
+
+@app.post("/api/simulation/stop")
+async def stop():
+    state.running = False
+    return {"status": "stopped"}
+
+@app.post("/api/optimize")
+async def optimize(req: OptimizeRequest):
+    if req.method != "qaoa":
+        raise HTTPException(400, "Only QAOA supported")
+    state.run_qaoa()
+    return {"allocation": state.current_allocation}
+
+# =========================
+# WebSocket
+# =========================
+@app.websocket("/ws")
+async def websocket(ws: WebSocket):
+    await ws.accept()
+    try:
+        while True:
+            await asyncio.sleep(1)
+            if state.running:
+                await state.step()
+
+            await ws.send_json({
+                "time": state.current_time,
+                "metrics": state.metrics,
+                "allocation": state.current_allocation,
+                "timestamp": datetime.now().isoformat()
+            })
+    except WebSocketDisconnect:
+        pass
+
+# =========================
+# Run
+# =========================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
