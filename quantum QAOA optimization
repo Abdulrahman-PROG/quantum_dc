@@ -1,192 +1,864 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field
+from typing import List, Dict, Optional, Tuple
 import asyncio
 import numpy as np
 from datetime import datetime
+import logging
+from contextlib import asynccontextmanager
+from functools import lru_cache
 
-from sklearn.linear_model import LinearRegression
-
+# Quantum & ML imports
 from qiskit_optimization import QuadraticProgram
 from qiskit_optimization.algorithms import MinimumEigenOptimizer
 from qiskit_algorithms import QAOA
-from qiskit_algorithms.optimizers import COBYLA
+from qiskit_algorithms.optimizers import COBYLA, SPSA
 from qiskit_aer.primitives import Sampler
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import IsolationForest
 
-app = FastAPI(title="Quantum AI Data Center Control", version="1.0.0")
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ==================== CONFIGURATION ====================
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    """Configuration management using environment variables"""
+    num_servers: int = 8
+    max_tasks: int = 20
+    quantum_max_tasks: int = 6  # Quantum limitation
+    quantum_max_servers: int = 4
+    qaoa_reps: int = 2
+    simulation_speed: float = 1.0  # seconds per step
+    anomaly_threshold: float = 3.0
+    
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+
+# ==================== QUANTUM OPTIMIZER ====================
+class QuantumOptimizer:
+    """Enhanced quantum optimizer with fallback mechanisms"""
+    
+    def __init__(self, reps: int = 2):
+        self.reps = reps
+        self.sampler = Sampler()
+        self.optimizer = COBYLA(maxiter=100)
+        self.qaoa = QAOA(
+            sampler=self.sampler,
+            optimizer=self.optimizer,
+            reps=reps,
+            initial_point=[0.1] * reps
+        )
+        self.min_eigen_optimizer = MinimumEigenOptimizer(self.qaoa)
+        
+        # Cache for common problem sizes
+        self._cache = {}
+    
+    def _create_quadratic_program(self, task_loads: List[float], 
+                                 server_caps: List[float]) -> QuadraticProgram:
+        """Create QUBO formulation for task allocation"""
+        n_tasks = len(task_loads)
+        n_servers = len(server_caps)
+        
+        qp = QuadraticProgram(name="Task_Allocation")
+        
+        # Create binary variables
+        for i in range(n_tasks):
+            for j in range(n_servers):
+                qp.binary_var(f"x_{i}_{j}")
+        
+        # Constraint: Each task assigned to exactly one server
+        for i in range(n_tasks):
+            constraint_dict = {f"x_{i}_{j}": 1 for j in range(n_servers)}
+            qp.linear_constraint(
+                linear=constraint_dict,
+                sense="==",
+                rhs=1,
+                name=f"task_{i}_assignment"
+            )
+        
+        # Constraint: Server capacity limits
+        for j in range(n_servers):
+            constraint_dict = {f"x_{i}_{j}": task_loads[i] 
+                             for i in range(n_tasks)}
+            qp.linear_constraint(
+                linear=constraint_dict,
+                sense="<=",
+                rhs=server_caps[j],
+                name=f"server_{j}_capacity"
+            )
+        
+        # Objective: Minimize load imbalance
+        objective = {}
+        for i in range(n_tasks):
+            for j in range(n_servers):
+                # Penalize based on load/capacity ratio
+                coefficient = task_loads[i] / server_caps[j]
+                objective[f"x_{i}_{j}"] = coefficient
+        
+        qp.minimize(linear=objective)
+        return qp
+    
+    def optimize(self, task_loads: List[float], 
+                server_caps: List[float]) -> Tuple[List[int], Dict]:
+        """
+        Optimize task allocation using QAOA with fallback
+        
+        Returns:
+            allocation: List of server indices for each task
+            metadata: Optimization details
+        """
+        cache_key = (tuple(task_loads), tuple(server_caps))
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        
+        try:
+            # Check if problem is too large for quantum
+            if len(task_loads) > settings.quantum_max_tasks or \
+               len(server_caps) > settings.quantum_max_servers:
+                logger.info("Problem too large for QAOA, using classical fallback")
+                return self._classical_fallback(task_loads, server_caps)
+            
+            qp = self._create_quadratic_program(task_loads, server_caps)
+            result = self.min_eigen_optimizer.solve(qp)
+            
+            # Parse result
+            allocation = []
+            n_servers = len(server_caps)
+            
+            for i in range(len(task_loads)):
+                for j in range(n_servers):
+                    if result.variables_dict.get(f"x_{i}_{j}", 0) == 1:
+                        allocation.append(j)
+                        break
+                else:
+                    # Fallback to server 0 if not found
+                    allocation.append(0)
+            
+            metadata = {
+                "method": "qaoa",
+                "optimal_value": float(result.fval),
+                "variables": len(result.variables_dict),
+                "success": True
+            }
+            
+            result_tuple = (allocation, metadata)
+            self._cache[cache_key] = result_tuple
+            return result_tuple
+            
+        except Exception as e:
+            logger.error(f"QAOA optimization failed: {e}")
+            return self._classical_fallback(task_loads, server_caps)
+    
+    def _classical_fallback(self, task_loads: List[float], 
+                           server_caps: List[float]) -> Tuple[List[int], Dict]:
+        """Classical greedy algorithm as fallback"""
+        allocation = []
+        current_loads = [0.0] * len(server_caps)
+        
+        # Sort tasks by load (descending)
+        sorted_tasks = sorted(enumerate(task_loads), 
+                            key=lambda x: x[1], reverse=True)
+        
+        for task_idx, load in sorted_tasks:
+            # Find server with minimum load that can accommodate
+            best_server = -1
+            min_utilization = float('inf')
+            
+            for server_idx, cap in enumerate(server_caps):
+                if current_loads[server_idx] + load <= cap:
+                    utilization = (current_loads[server_idx] + load) / cap
+                    if utilization < min_utilization:
+                        min_utilization = utilization
+                        best_server = server_idx
+            
+            if best_server == -1:
+                # All servers full, use server with most capacity
+                best_server = np.argmax(server_caps)
+            
+            allocation.append(best_server)
+            current_loads[best_server] += load
+        
+        # Reorder allocation to original task order
+        final_allocation = [0] * len(task_loads)
+        for new_idx, (orig_idx, _) in enumerate(sorted_tasks):
+            final_allocation[orig_idx] = allocation[new_idx]
+        
+        metadata = {
+            "method": "classical_greedy",
+            "optimal_value": sum(current_loads),
+            "success": True,
+            "fallback_used": True
+        }
+        
+        return final_allocation, metadata
+
+# ==================== ML COMPONENTS ====================
+class PredictiveEngine:
+    """Machine learning for load prediction and anomaly detection"""
+    
+    def __init__(self):
+        self.regressor = LinearRegression()
+        self.anomaly_detector = IsolationForest(contamination=0.1)
+        self.load_history = []
+        self.trained = False
+    
+    def update(self, new_loads: List[float]):
+        """Update models with new data"""
+        self.load_history.extend(new_loads)
+        
+        if len(self.load_history) >= 20:
+            # Train regressor
+            X = np.arange(len(self.load_history)).reshape(-1, 1)
+            y = np.array(self.load_history)
+            self.regressor.fit(X, y)
+            
+            # Train anomaly detector
+            recent_data = np.array(self.load_history[-50:]).reshape(-1, 1)
+            if len(recent_data) >= 10:
+                self.anomaly_detector.fit(recent_data)
+            
+            self.trained = True
+    
+    @lru_cache(maxsize=100)
+    def predict_load(self, steps_ahead: int, current_load: float) -> float:
+        """Predict future load with caching"""
+        if not self.trained or not self.load_history:
+            return current_load * np.random.uniform(0.8, 1.2)
+        
+        last_point = len(self.load_history)
+        prediction = self.regressor.predict([[last_point + steps_ahead]])[0]
+        return max(prediction, current_load * 0.5)
+    
+    def detect_anomaly(self, current_load: float) -> bool:
+        """Detect anomalous load patterns"""
+        if not self.trained or len(self.load_history) < 10:
+            return False
+        
+        recent_loads = np.array(self.load_history[-10:] + [current_load]).reshape(-1, 1)
+        predictions = self.anomaly_detector.predict(recent_loads)
+        return predictions[-1] == -1  # -1 indicates anomaly
+
+# ==================== DATA CENTER STATE ====================
+class DataCenterState:
+    """Centralized state management with dependency injection"""
+    
+    def __init__(self):
+        self.running = False
+        self.current_time = 0
+        self.optimization_mode = "hybrid"  # hybrid, quantum, classical
+        
+        # Components
+        self.quantum_optimizer = QuantumOptimizer(reps=settings.qaoa_reps)
+        self.predictive_engine = PredictiveEngine()
+        
+        # Initialize servers and tasks
+        self.servers = self._initialize_servers()
+        self.tasks = self._initialize_tasks()
+        self.current_allocation = self._initial_allocation()
+        
+        # Metrics
+        self.metrics = {
+            "total_energy_kwh": 0.0,
+            "avg_server_utilization": 0.0,
+            "carbon_emissions_kg": 0.0,
+            "cost_per_hour": 0.0,
+            "anomalies_detected": 0,
+            "quantum_optimizations": 0,
+            "classical_optimizations": 0,
+            "prediction_accuracy": 0.0
+        }
+        
+        # Historical data
+        self.utilization_history = []
+        self.energy_history = []
+        self.optimization_history = []
+    
+    def _initialize_servers(self) -> List[Dict]:
+        """Initialize server configurations"""
+        servers = []
+        base_capacities = [16, 12, 8, 8, 12, 16, 8, 12]  # Heterogeneous
+        
+        for i, cap in enumerate(base_capacities[:settings.num_servers]):
+            servers.append({
+                "id": i,
+                "capacity": cap,
+                "base_power": cap * 15,  # Watts
+                "efficiency": np.random.uniform(0.8, 0.95),
+                "pue": np.random.uniform(1.1, 1.3),  # Power Usage Effectiveness
+                "current_load": 0.0,
+                "temperature": np.random.uniform(20, 25)
+            })
+        return servers
+    
+    def _initialize_tasks(self) -> List[Dict]:
+        """Initialize task queue"""
+        tasks = []
+        n_tasks = min(settings.max_tasks, 15)
+        
+        for i in range(n_tasks):
+            cpu_load = np.random.choice([1, 2, 4, 8], p=[0.3, 0.4, 0.2, 0.1])
+            tasks.append({
+                "id": i,
+                "cpu_cores": cpu_load,
+                "memory_gb": cpu_load * np.random.uniform(2, 4),
+                "priority": np.random.randint(1, 11),
+                "duration": np.random.randint(1, 10),
+                "arrival_time": i
+            })
+        return tasks
+    
+    def _initial_allocation(self) -> List[int]:
+        """Initial task allocation using round-robin"""
+        allocation = []
+        for i, task in enumerate(self.tasks):
+            allocation.append(i % len(self.servers))
+        return allocation
+    
+    async def step_simulation(self):
+        """Advance simulation by one time step"""
+        self.current_time += 1
+        
+        # Simulate task arrivals/departures
+        self._update_task_queue()
+        
+        # Update predictive models
+        current_loads = self._get_current_loads()
+        self.predictive_engine.update(current_loads)
+        
+        # Detect anomalies
+        total_load = sum(current_loads)
+        if self.predictive_engine.detect_anomaly(total_load):
+            self.metrics["anomalies_detected"] += 1
+            logger.warning(f"Anomaly detected at time {self.current_time}")
+        
+        # Run optimization based on mode and schedule
+        if self.current_time % 3 == 0:
+            await self._run_optimization()
+        
+        # Update metrics
+        self._update_metrics()
+        
+        # Cleanup old tasks
+        self._cleanup_completed_tasks()
+    
+    def _update_task_queue(self):
+        """Simulate dynamic task arrivals"""
+        # Some tasks complete
+        if self.tasks and np.random.random() < 0.1:
+            complete_idx = np.random.randint(0, len(self.tasks))
+            self.tasks.pop(complete_idx)
+            if complete_idx < len(self.current_allocation):
+                self.current_allocation.pop(complete_idx)
+        
+        # New tasks arrive
+        if np.random.random() < 0.2 and len(self.tasks) < settings.max_tasks:
+            cpu_load = np.random.choice([1, 2, 4, 8], p=[0.4, 0.3, 0.2, 0.1])
+            new_task = {
+                "id": len(self.tasks),
+                "cpu_cores": cpu_load,
+                "memory_gb": cpu_load * np.random.uniform(2, 4),
+                "priority": np.random.randint(1, 11),
+                "duration": np.random.randint(1, 10),
+                "arrival_time": self.current_time
+            }
+            self.tasks.append(new_task)
+            # Initially assign to least loaded server
+            self.current_allocation.append(self._find_least_loaded_server())
+    
+    def _find_least_loaded_server(self) -> int:
+        """Find server with minimum current load"""
+        loads = [0] * len(self.servers)
+        for task_idx, server_idx in enumerate(self.current_allocation):
+            if task_idx < len(self.tasks):
+                loads[server_idx] += self.tasks[task_idx]["cpu_cores"]
+        
+        # Consider capacity for load balancing
+        utilizations = [loads[i] / self.servers[i]["capacity"] 
+                       for i in range(len(self.servers))]
+        return int(np.argmin(utilizations))
+    
+    async def _run_optimization(self):
+        """Run optimization based on current mode"""
+        if self.optimization_mode == "none":
+            return
+        
+        # Get current state
+        task_loads = [t["cpu_cores"] for t in self.tasks]
+        server_caps = [s["capacity"] for s in self.servers]
+        
+        if len(task_loads) == 0:
+            return
+        
+        try:
+            if self.optimization_mode == "quantum":
+                # Use quantum for small problems, classical for large
+                if len(task_loads) <= settings.quantum_max_tasks:
+                    allocation, metadata = self.quantum_optimizer.optimize(
+                        task_loads, server_caps
+                    )
+                    self.metrics["quantum_optimizations"] += 1
+                else:
+                    allocation, metadata = self.quantum_optimizer._classical_fallback(
+                        task_loads, server_caps
+                    )
+                    self.metrics["classical_optimizations"] += 1
+                
+            elif self.optimization_mode == "classical":
+                allocation, metadata = self.quantum_optimizer._classical_fallback(
+                    task_loads, server_caps
+                )
+                self.metrics["classical_optimizations"] += 1
+            
+            else:  # hybrid mode
+                # Predict future loads for proactive optimization
+                predicted_loads = []
+                for i, load in enumerate(task_loads):
+                    predicted = self.predictive_engine.predict_load(i, load)
+                    predicted_loads.append(predicted)
+                
+                if len(predicted_loads) <= settings.quantum_max_tasks:
+                    allocation, metadata = self.quantum_optimizer.optimize(
+                        predicted_loads, server_caps
+                    )
+                    self.metrics["quantum_optimizations"] += 1
+                else:
+                    allocation, metadata = self.quantum_optimizer._classical_fallback(
+                        predicted_loads, server_caps
+                    )
+                    self.metrics["classical_optimizations"] += 1
+            
+            # Update allocation
+            self.current_allocation = allocation[:len(self.tasks)]
+            self.optimization_history.append({
+                "time": self.current_time,
+                "method": metadata["method"],
+                "tasks": len(task_loads),
+                "servers": len(server_caps)
+            })
+            
+        except Exception as e:
+            logger.error(f"Optimization failed: {e}")
+    
+    def _get_current_loads(self) -> List[float]:
+        """Get current CPU loads per server"""
+        loads = [0.0] * len(self.servers)
+        for task_idx, server_idx in enumerate(self.current_allocation):
+            if task_idx < len(self.tasks):
+                loads[server_idx] += self.tasks[task_idx]["cpu_cores"]
+        return loads
+    
+    def _update_metrics(self):
+        """Update all performance metrics"""
+        # Calculate server utilizations
+        loads = self._get_current_loads()
+        utilizations = []
+        
+        for i, server in enumerate(self.servers):
+            utilization = loads[i] / server["capacity"] * 100
+            utilizations.append(utilization)
+            self.servers[i]["current_load"] = loads[i]
+            self.servers[i]["utilization"] = utilization
+        
+        avg_utilization = np.mean(utilizations)
+        self.utilization_history.append(avg_utilization)
+        
+        # Calculate energy consumption
+        total_power = 0.0
+        for i, server in enumerate(self.servers):
+            base_power = server["base_power"]
+            load_power = loads[i] * 10  # 10W per core
+            server_power = (base_power + load_power) * server["pue"]
+            total_power += server_power
+        
+        # Convert to kWh for the time step (assuming 1 step = 1 hour for simplicity)
+        energy_kwh = total_power / 1000
+        self.energy_history.append(energy_kwh)
+        
+        # Update metrics
+        self.metrics.update({
+            "total_energy_kwh": energy_kwh,
+            "avg_server_utilization": avg_utilization,
+            "carbon_emissions_kg": energy_kwh * 0.4,  # 0.4 kg CO2 per kWh
+            "cost_per_hour": energy_kwh * 0.12,  # $0.12 per kWh
+            "active_servers": sum(1 for u in utilizations if u > 0),
+            "max_utilization": max(utilizations) if utilizations else 0,
+            "min_utilization": min(utilizations) if utilizations else 0
+        })
+    
+    def _cleanup_completed_tasks(self):
+        """Remove tasks that have exceeded their duration"""
+        indices_to_remove = []
+        for i, task in enumerate(self.tasks):
+            if self.current_time - task["arrival_time"] > task["duration"]:
+                indices_to_remove.append(i)
+        
+        # Remove from end to avoid index issues
+        for idx in sorted(indices_to_remove, reverse=True):
+            if idx < len(self.tasks):
+                self.tasks.pop(idx)
+            if idx < len(self.current_allocation):
+                self.current_allocation.pop(idx)
+
+# ==================== FASTAPI APPLICATION ====================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifecycle"""
+    # Startup
+    logger.info("Starting Quantum Data Center Optimizer")
+    state = DataCenterState()
+    app.state.state = state
+    app.state.connection_manager = ConnectionManager()
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down Quantum Data Center Optimizer")
+    # Cleanup quantum resources if needed
+
+app = FastAPI(
+    title="Quantum Data Center Optimization System",
+    version="2.0.0",
+    lifespan=lifespan
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-class LoadPredictor:
+# ==================== WEBSOCKET MANAGER ====================
+class ConnectionManager:
     def __init__(self):
-        self.model = LinearRegression()
-        self.trained = False
+        self.active_connections: List[WebSocket] = []
+        self._lock = asyncio.Lock()
+    
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        async with self._lock:
+            self.active_connections.append(websocket)
+    
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+    
+    async def broadcast(self, message: dict):
+        disconnected = []
+        async with self._lock:
+            for connection in self.active_connections:
+                try:
+                    await connection.send_json(message)
+                except (WebSocketDisconnect, RuntimeError):
+                    disconnected.append(connection)
+        
+        for connection in disconnected:
+            self.disconnect(connection)
 
-    def update(self, history):
-        if len(history) < 5:
-            return
-        X = np.arange(len(history)).reshape(-1, 1)
-        y = np.array(history)
-        self.model.fit(X, y)
-        self.trained = True
+# ==================== DEPENDENCIES ====================
+def get_state(request) -> DataCenterState:
+    return request.app.state.state
 
-    def predict(self, step, fallback):
-        if not self.trained:
-            return fallback
-        return max(self.model.predict([[step]])[0], fallback)
+def get_connection_manager(request) -> ConnectionManager:
+    return request.app.state.connection_manager
 
-class AnomalyDetector:
-    def __init__(self, threshold=3.0):
-        self.history = []
-        self.threshold = threshold
+# ==================== PYDANTIC MODELS ====================
+class OptimizationRequest(BaseModel):
+    method: str = Field(default="hybrid", description="hybrid, quantum, classical")
+    use_prediction: bool = Field(default=True, description="Use ML predictions")
 
-    def update(self, value):
-        self.history.append(value)
-        if len(self.history) < 10:
-            return False
-        mean = np.mean(self.history)
-        std = np.std(self.history) + 1e-6
-        return abs((value - mean) / std) > self.threshold
+class SimulationConfig(BaseModel):
+    optimization_mode: str = Field(default="hybrid")
+    speed_multiplier: float = Field(default=1.0, ge=0.1, le=10.0)
 
-class QAOATaskAllocator:
-    def __init__(self, reps=1):
-        self.qaoa = QAOA(sampler=Sampler(), optimizer=COBYLA(), reps=reps)
-        self.optimizer = MinimumEigenOptimizer(self.qaoa)
+class TaskCreate(BaseModel):
+    cpu_cores: int = Field(default=2, ge=1, le=16)
+    memory_gb: int = Field(default=4, ge=1, le=64)
+    priority: int = Field(default=5, ge=1, le=10)
+    duration: int = Field(default=5, ge=1, le=24)
 
-    def optimize(self, task_loads, server_caps):
-        qp = QuadraticProgram()
-        n_tasks = len(task_loads)
-        n_servers = len(server_caps)
-
-        for i in range(n_tasks):
-            for j in range(n_servers):
-                qp.binary_var(f"x_{i}_{j}")
-
-        for i in range(n_tasks):
-            qp.linear_constraint(
-                linear={f"x_{i}_{j}": 1 for j in range(n_servers)},
-                sense="==",
-                rhs=1
-            )
-
-        objective = {}
-        for i, load in enumerate(task_loads):
-            for j, cap in enumerate(server_caps):
-                objective[f"x_{i}_{j}"] = load / cap
-
-        qp.minimize(linear=objective)
-        result = self.optimizer.solve(qp)
-
-        allocation = []
-        for i in range(n_tasks):
-            for j in range(n_servers):
-                if result.variables_dict.get(f"x_{i}_{j}", 0) == 1:
-                    allocation.append(j)
-
-        return allocation
-
-class DataCenterState:
-    def __init__(self):
-        self.running = False
-        self.current_time = 0
-
-        self.servers = [{"capacity": 8}, {"capacity": 6}, {"capacity": 4}]
-        self.tasks = [{"cpu": 2}, {"cpu": 3}, {"cpu": 1}, {"cpu": 4}]
-        self.current_allocation = [0 for _ in self.tasks]
-
-        self.metrics = {"energy": 0.0, "server_utilization": 0.0, "anomalies": 0}
-        self.cpu_history = []
-
-        self.predictor = LoadPredictor()
-        self.anomaly_detector = AnomalyDetector()
-        self.qaoa = QAOATaskAllocator()
-
-    async def step(self):
-        self.current_time += 1
-        utilization = np.random.uniform(40, 90)
-        self.cpu_history.append(utilization)
-
-        self.predictor.update(self.cpu_history)
-
-        if self.anomaly_detector.update(utilization):
-            self.metrics["anomalies"] += 1
-
-        if self.current_time % 5 == 0:
-            self.run_qaoa()
-
-        self.metrics["server_utilization"] = utilization
-        self.metrics["energy"] = utilization * 0.15
-
-    def run_qaoa(self):
-        num_tasks = min(3, len(self.tasks))
-        num_servers = min(2, len(self.servers))
-
-        predicted_loads = []
-        for i in range(num_tasks):
-            base = self.tasks[i]["cpu"]
-            pred = self.predictor.predict(len(self.cpu_history) + i, base)
-            predicted_loads.append(pred)
-
-        server_caps = [s["capacity"] for s in self.servers[:num_servers]]
-        allocation = self.qaoa.optimize(predicted_loads, server_caps)
-
-        for i, s in enumerate(allocation):
-            self.current_allocation[i] = s
-
-state = DataCenterState()
-
-class OptimizeRequest(BaseModel):
-    method: str = "qaoa"
+# ==================== API ENDPOINTS ====================
+@app.get("/", response_class=HTMLResponse)
+async def read_root():
+    """Serve main interface"""
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Quantum Data Center Control</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; }
+            .container { max-width: 1200px; margin: auto; }
+            .metric { background: #f5f5f5; padding: 15px; margin: 10px; border-radius: 5px; }
+            .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Quantum Data Center Optimization System</h1>
+            <div id="status"></div>
+            <div class="grid" id="metrics"></div>
+        </div>
+        <script>
+            // WebSocket connection for real-time updates
+            const ws = new WebSocket(`ws://${window.location.host}/ws`);
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                updateDisplay(data);
+            };
+            
+            function updateDisplay(data) {
+                document.getElementById('status').innerHTML = 
+                    `<h2>Time: ${data.time} | Running: ${data.running}</h2>`;
+                
+                let metricsHtml = '';
+                for (const [key, value] of Object.entries(data.metrics)) {
+                    metricsHtml += `
+                    <div class="metric">
+                        <strong>${key.replace(/_/g, ' ').toUpperCase()}</strong><br>
+                        ${typeof value === 'number' ? value.toFixed(2) : value}
+                    </div>`;
+                }
+                document.getElementById('metrics').innerHTML = metricsHtml;
+            }
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
 
 @app.get("/api/status")
-async def status():
+async def get_status(state: DataCenterState = Depends(get_state)):
+    """Get current system status"""
     return {
         "running": state.running,
-        "time": state.current_time,
+        "current_time": state.current_time,
+        "optimization_mode": state.optimization_mode,
         "metrics": state.metrics,
-        "allocation": state.current_allocation
+        "num_servers": len(state.servers),
+        "num_tasks": len(state.tasks),
+        "active_connections": len(app.state.connection_manager.active_connections)
     }
 
-@app.post("/api/simulation/start")
-async def start():
-    state.running = True
-    return {"status": "started"}
+@app.get("/api/servers")
+async def get_servers(state: DataCenterState = Depends(get_state)):
+    """Get detailed server information"""
+    loads = [0] * len(state.servers)
+    for task_idx, server_idx in enumerate(state.current_allocation):
+        if task_idx < len(state.tasks):
+            loads[server_idx] += state.tasks[task_idx]["cpu_cores"]
+    
+    servers_info = []
+    for i, server in enumerate(state.servers):
+        utilization = loads[i] / server["capacity"] * 100 if server["capacity"] > 0 else 0
+        servers_info.append({
+            "id": server["id"],
+            "capacity": server["capacity"],
+            "current_load": loads[i],
+            "utilization": round(utilization, 2),
+            "temperature": server["temperature"],
+            "efficiency": server["efficiency"],
+            "pue": server["pue"],
+            "status": "active" if utilization > 0 else "idle",
+            "power_usage_w": server["base_power"] + loads[i] * 10
+        })
+    
+    return servers_info
 
-@app.post("/api/simulation/stop")
-async def stop():
-    state.running = False
-    return {"status": "stopped"}
+@app.get("/api/tasks")
+async def get_tasks(state: DataCenterState = Depends(get_state)):
+    """Get current tasks with allocation"""
+    tasks_info = []
+    for i, task in enumerate(state.tasks):
+        server_idx = state.current_allocation[i] if i < len(state.current_allocation) else -1
+        tasks_info.append({
+            "id": task["id"],
+            "cpu_cores": task["cpu_cores"],
+            "memory_gb": task["memory_gb"],
+            "priority": task["priority"],
+            "duration": task["duration"],
+            "arrival_time": task["arrival_time"],
+            "assigned_server": server_idx,
+            "age": state.current_time - task["arrival_time"]
+        })
+    
+    return tasks_info
+
+@app.get("/api/history")
+async def get_history(state: DataCenterState = Depends(get_state)):
+    """Get historical data for charts"""
+    return {
+        "utilization": state.utilization_history[-100:],  # Last 100 points
+        "energy": state.energy_history[-100:],
+        "timestamps": list(range(len(state.utilization_history)))[-100:],
+        "optimizations": state.optimization_history[-20:]
+    }
 
 @app.post("/api/optimize")
-async def optimize(req: OptimizeRequest):
-    if req.method != "qaoa":
-        raise HTTPException(400, "Only QAOA supported")
-    state.run_qaoa()
-    return {"allocation": state.current_allocation}
+async def run_optimization(
+    request: OptimizationRequest,
+    state: DataCenterState = Depends(get_state)
+):
+    """Run optimization on demand"""
+    try:
+        # Store original mode
+        original_mode = state.optimization_mode
+        
+        # Temporary change mode if specified
+        if request.method != "hybrid":
+            state.optimization_mode = request.method
+        
+        # Run optimization
+        await state._run_optimization()
+        
+        # Restore mode
+        state.optimization_mode = original_mode
+        
+        # Get results
+        loads = state._get_current_loads()
+        utilizations = [loads[i] / state.servers[i]["capacity"] * 100 
+                       for i in range(len(state.servers))]
+        
+        return {
+            "success": True,
+            "allocation": state.current_allocation,
+            "server_utilizations": utilizations,
+            "load_imbalance": max(utilizations) - min(utilizations),
+            "total_load": sum(loads),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/simulation/start")
+async def start_simulation(state: DataCenterState = Depends(get_state)):
+    """Start the simulation"""
+    state.running = True
+    return {"status": "started", "message": "Simulation started successfully"}
+
+@app.post("/api/simulation/stop")
+async def stop_simulation(state: DataCenterState = Depends(get_state)):
+    """Stop the simulation"""
+    state.running = False
+    return {"status": "stopped", "message": "Simulation stopped"}
+
+@app.post("/api/simulation/reset")
+async def reset_simulation(state: DataCenterState = Depends(get_state)):
+    """Reset simulation state"""
+    # Create new state
+    new_state = DataCenterState()
+    app.state.state = new_state
+    
+    return {
+        "status": "reset",
+        "message": "Simulation reset complete",
+        "new_state": {
+            "num_servers": len(new_state.servers),
+            "num_tasks": len(new_state.tasks),
+            "time": new_state.current_time
+        }
+    }
+
+@app.post("/api/tasks/create")
+async def create_task(
+    task: TaskCreate,
+    state: DataCenterState = Depends(get_state)
+):
+    """Manually create a new task"""
+    new_task = {
+        "id": len(state.tasks),
+        "cpu_cores": task.cpu_cores,
+        "memory_gb": task.memory_gb,
+        "priority": task.priority,
+        "duration": task.duration,
+        "arrival_time": state.current_time
+    }
+    
+    state.tasks.append(new_task)
+    
+    # Assign to least loaded server
+    server_idx = state._find_least_loaded_server()
+    state.current_allocation.append(server_idx)
+    
+    return {
+        "success": True,
+        "task_id": new_task["id"],
+        "assigned_server": server_idx,
+        "message": f"Task created and assigned to server {server_idx}"
+    }
+
+@app.post("/api/config")
+async def update_config(
+    config: SimulationConfig,
+    state: DataCenterState = Depends(get_state)
+):
+    """Update simulation configuration"""
+    state.optimization_mode = config.optimization_mode
+    # In a real app, you'd update the simulation speed
+    
+    return {
+        "status": "updated",
+        "config": config.dict(),
+        "current_mode": state.optimization_mode
+    }
+
+# ==================== WEBSOCKET ENDPOINT ====================
 @app.websocket("/ws")
-async def websocket(ws: WebSocket):
-    await ws.accept()
+async def websocket_endpoint(
+    websocket: WebSocket,
+    state: DataCenterState = Depends(get_state),
+    manager: ConnectionManager = Depends(get_connection_manager)
+):
+    await manager.connect(websocket)
+    
     try:
         while True:
-            await asyncio.sleep(1)
+            # Wait for simulation step or client message
+            await asyncio.sleep(1 / settings.simulation_speed)
+            
             if state.running:
-                await state.step()
-
-            await ws.send_json({
+                await state.step_simulation()
+            
+            # Prepare update
+            update = {
+                "timestamp": datetime.now().isoformat(),
                 "time": state.current_time,
+                "running": state.running,
                 "metrics": state.metrics,
-                "allocation": state.current_allocation,
-                "timestamp": datetime.now().isoformat()
-            })
+                "num_tasks": len(state.tasks),
+                "num_servers": len(state.servers),
+                "optimization_mode": state.optimization_mode
+            }
+            
+            await manager.broadcast(update)
+            
     except WebSocketDisconnect:
-        pass
+        manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        manager.disconnect(websocket)
 
+# ==================== STATIC FILES ====================
+# Uncomment to serve static files
+# app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ==================== MAIN ENTRY POINT ====================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        reload=True,  # Auto-reload on code changes
+        log_level="info"
+    )
