@@ -5,6 +5,8 @@ let ws = null;
 let charts = {};
 let previousMetrics = {};
 let eventLogMaxEntries = 50;
+let wsReconnectDelay = 1000; // Start at 1s, exponential backoff
+const WS_MAX_RECONNECT_DELAY = 30000;
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', () => {
@@ -24,13 +26,15 @@ function initializeWebSocket() {
     ws.onopen = () => {
         updateConnectionStatus(true);
         addEvent('Connected to data center', 'success');
+        wsReconnectDelay = 1000; // Reset backoff on successful connection
     };
 
     ws.onclose = () => {
         updateConnectionStatus(false);
         addEvent('Disconnected from data center', 'error');
-        // Attempt to reconnect after 3 seconds
-        setTimeout(initializeWebSocket, 3000);
+        // Reconnect with exponential backoff
+        setTimeout(initializeWebSocket, wsReconnectDelay);
+        wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_MAX_RECONNECT_DELAY);
     };
 
     ws.onerror = (error) => {
@@ -163,11 +167,9 @@ function updateSimulationStatus(running) {
     }
 }
 
-// Load Initial Data
+// Load Initial Data — run independent fetches in parallel
 async function loadInitialData() {
-    await loadStatus();
-    await loadServersAndTasks();
-    await loadTimeseries();
+    await Promise.all([loadStatus(), loadServersAndTasks(), loadTimeseries()]);
 }
 
 async function loadStatus() {
@@ -175,7 +177,7 @@ async function loadStatus() {
         const response = await fetch('/api/status');
         const data = await response.json();
         updateMetrics(data.metrics);
-        updateTime(data.time, data.hour);
+        updateTime(data.current_time, data.hour);
         updateSimulationStatus(data.running);
     } catch (error) {
         console.error('Failed to load status:', error);
@@ -214,11 +216,11 @@ async function loadTimeseries() {
 // Realtime Updates
 function handleRealtimeUpdate(data) {
     updateMetrics(data.metrics);
-    updateTime(data.time, data.hour);
+    updateTime(data.current_time, data.hour);
     updateSimulationStatus(data.running);
 
     // Reload visualizations periodically
-    if (data.time % 5 === 0) {
+    if (data.current_time % 5 === 0) {
         loadServersAndTasks();
     }
 }
@@ -325,7 +327,7 @@ function renderTaskQueue(tasks) {
         taskDiv.innerHTML = `
             <div class="task-info">
                 <div class="task-id">Task #${task.id}</div>
-                <div class="task-details">${task.cpu_cores} cores, ${task.memory_gb} GB</div>
+                <div class="task-details">${task.cpu_cores} cores, ${Number(task.memory_gb).toFixed(1)} GB</div>
             </div>
             <div class="task-server">S${task.assigned_server}</div>
         `;
