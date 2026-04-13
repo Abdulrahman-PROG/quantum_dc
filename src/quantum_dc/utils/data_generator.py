@@ -24,9 +24,9 @@ class DataCenterConfig:
 class DataCenterDataGenerator:
     """Generate realistic data center operation data"""
 
-    def __init__(self, config: DataCenterConfig = None):
+    def __init__(self, config: DataCenterConfig = None, seed: int = 42):
         self.config = config or DataCenterConfig()
-        np.random.seed(42)  # For reproducibility
+        self.rng = np.random.default_rng(seed)
 
     def generate_server_data(self) -> Dict[str, np.ndarray]:
         """
@@ -36,22 +36,22 @@ class DataCenterDataGenerator:
             Dictionary with server capacities, power consumption, efficiency
         """
         # Server capacities (CPU cores): Mix of small, medium, large servers
-        capacities = np.random.choice(
+        capacities = self.rng.choice(
             [100, 200, 400, 800],  # CPU cores
             size=self.config.num_servers,
             p=[0.3, 0.4, 0.2, 0.1]  # More medium servers
         )
 
         # Base power consumption (watts) - scales with capacity
-        base_power = capacities * 1.5 + np.random.normal(0, 20, self.config.num_servers)
+        base_power = capacities * 1.5 + self.rng.normal(0, 20, self.config.num_servers)
         base_power = np.maximum(base_power, 50)  # Minimum 50W
 
         # Power efficiency (PUE - Power Usage Effectiveness)
         # 1.0 is perfect, typical is 1.2-2.0
-        pue = np.random.uniform(1.2, 1.8, self.config.num_servers)
+        pue = self.rng.uniform(1.2, 1.8, self.config.num_servers)
 
         # Server utilization efficiency (0-1)
-        efficiency = np.random.uniform(0.7, 0.95, self.config.num_servers)
+        efficiency = self.rng.uniform(0.7, 0.95, self.config.num_servers)
 
         return {
             'capacities': capacities.astype(float),
@@ -69,24 +69,24 @@ class DataCenterDataGenerator:
         """
         # Task CPU loads (cores required)
         # Mix of small (web requests), medium (batch jobs), large (ML training)
-        cpu_loads = np.random.choice(
+        cpu_loads = self.rng.choice(
             [10, 25, 50, 100, 200],
             size=self.config.num_tasks,
             p=[0.4, 0.3, 0.2, 0.08, 0.02]  # Most tasks are small
         )
 
         # Memory requirements (GB)
-        memory_loads = cpu_loads * np.random.uniform(2, 8, self.config.num_tasks)
+        memory_loads = cpu_loads * self.rng.uniform(2, 8, self.config.num_tasks)
 
         # Task priority (1-10, higher = more important)
-        priorities = np.random.randint(1, 11, self.config.num_tasks)
+        priorities = self.rng.integers(1, 11, self.config.num_tasks)
 
         # Task duration (hours)
-        durations = np.random.exponential(2.0, self.config.num_tasks)
+        durations = self.rng.exponential(2.0, self.config.num_tasks)
         durations = np.clip(durations, 0.1, 12.0)
 
         # Task flexibility (can it be delayed?)
-        flexibility = np.random.uniform(0, 1, self.config.num_tasks)
+        flexibility = self.rng.uniform(0, 1, self.config.num_tasks)
 
         return {
             'cpu_loads': cpu_loads.astype(float),
@@ -113,7 +113,7 @@ class DataCenterDataGenerator:
             2 * np.pi * (hours - 4) / 24
         )
         # Add some noise
-        outdoor_temp += np.random.normal(0, 2, self.config.num_timeslots)
+        outdoor_temp += self.rng.normal(0, 2, self.config.num_timeslots)
 
         # Electricity price ($/kWh) - higher during peak hours (6pm-10pm)
         # Off-peak: 0.10, peak: 0.25
@@ -135,7 +135,7 @@ class DataCenterDataGenerator:
 
         renewable_fraction = 0.3 * solar_pattern + 0.2 * wind_pattern
         carbon_intensity = self.config.base_carbon_intensity * (1 - renewable_fraction)
-        carbon_intensity += np.random.normal(0, 20, self.config.num_timeslots)
+        carbon_intensity += self.rng.normal(0, 20, self.config.num_timeslots)
         carbon_intensity = np.maximum(carbon_intensity, 100)  # Min 100 g/kWh
 
         # Workload demand (normalized 0-1) - peaks during business hours
@@ -161,17 +161,17 @@ class DataCenterDataGenerator:
             Dictionary with heat loads, current temps, setpoints
         """
         # Heat load per zone (kW) - varies by zone
-        heat_loads = np.random.uniform(30, 80, self.config.num_zones)
+        heat_loads = self.rng.uniform(30, 80, self.config.num_zones)
 
         # Current temperature per zone (°C)
-        current_temps = np.random.uniform(20, 25, self.config.num_zones)
+        current_temps = self.rng.uniform(20, 25, self.config.num_zones)
 
         # Current setpoints (°C)
-        current_setpoints = np.random.uniform(18, 24, self.config.num_zones)
+        current_setpoints = self.rng.uniform(18, 24, self.config.num_zones)
 
         # Cooling efficiency (COP - Coefficient of Performance)
         # Typical range 2.5-4.0 (higher is better)
-        cooling_cop = np.random.uniform(2.5, 4.0, self.config.num_zones)
+        cooling_cop = self.rng.uniform(2.5, 4.0, self.config.num_zones)
 
         return {
             'heat_loads': heat_loads,
@@ -191,28 +191,28 @@ class DataCenterDataGenerator:
             Dictionary with sensor readings and failure indicators
         """
         # Temperature sensors (°C)
-        temp_normal = np.random.normal(23, 3, num_samples)
+        temp_normal = self.rng.normal(23, 3, num_samples)
 
         # Vibration sensors (mm/s)
-        vibration_normal = np.random.exponential(2, num_samples)
+        vibration_normal = self.rng.exponential(2, num_samples)
 
         # Power consumption (kW)
-        power_normal = np.random.normal(100, 15, num_samples)
+        power_normal = self.rng.normal(100, 15, num_samples)
 
         # Current (Amperes)
-        current_normal = np.random.normal(45, 8, num_samples)
+        current_normal = self.rng.normal(45, 8, num_samples)
 
         # Voltage (Volts)
-        voltage_normal = np.random.normal(220, 5, num_samples)
+        voltage_normal = self.rng.normal(220, 5, num_samples)
 
         # Humidity (%)
-        humidity_normal = np.random.normal(50, 10, num_samples)
+        humidity_normal = self.rng.normal(50, 10, num_samples)
 
         # Equipment age (years)
-        age = np.random.uniform(0, 10, num_samples)
+        age = self.rng.uniform(0, 10, num_samples)
 
         # Operating cycles (thousands)
-        cycles = np.random.uniform(0, 100, num_samples)
+        cycles = self.rng.uniform(0, 100, num_samples)
 
         # Create failure probability based on conditions
         failure_prob = (
@@ -227,12 +227,12 @@ class DataCenterDataGenerator:
         failures = (failure_prob > 0.5).astype(int)
 
         # Add some anomalies (10% of data)
-        anomaly_indices = np.random.choice(
+        anomaly_indices = self.rng.choice(
             num_samples, size=int(0.1 * num_samples), replace=False
         )
-        temp_normal[anomaly_indices] += np.random.uniform(10, 20, len(anomaly_indices))
-        vibration_normal[anomaly_indices] *= np.random.uniform(2, 4, len(anomaly_indices))
-        power_normal[anomaly_indices] *= np.random.uniform(1.5, 2.5, len(anomaly_indices))
+        temp_normal[anomaly_indices] += self.rng.uniform(10, 20, len(anomaly_indices))
+        vibration_normal[anomaly_indices] *= self.rng.uniform(2, 4, len(anomaly_indices))
+        power_normal[anomaly_indices] *= self.rng.uniform(1.5, 2.5, len(anomaly_indices))
 
         return {
             'temperature': temp_normal,
@@ -280,13 +280,13 @@ class DataCenterDataGenerator:
         n_per_type = num_samples // 3
 
         # Type 1: CPU-intensive (e.g., computation, ML training)
-        cpu_intensive = np.random.randn(n_per_type, 4) * 0.15 + np.array([0.9, 0.3, 0.2, 0.6])
+        cpu_intensive = self.rng.standard_normal((n_per_type, 4)) * 0.15 + np.array([0.9, 0.3, 0.2, 0.6])
 
         # Type 2: Memory-intensive (e.g., databases, caching)
-        mem_intensive = np.random.randn(n_per_type, 4) * 0.15 + np.array([0.4, 0.9, 0.3, 0.7])
+        mem_intensive = self.rng.standard_normal((n_per_type, 4)) * 0.15 + np.array([0.4, 0.9, 0.3, 0.7])
 
         # Type 3: Network-intensive (e.g., web servers, streaming)
-        net_intensive = np.random.randn(n_per_type, 4) * 0.15 + np.array([0.3, 0.4, 0.9, 0.5])
+        net_intensive = self.rng.standard_normal((n_per_type, 4)) * 0.15 + np.array([0.3, 0.4, 0.9, 0.5])
 
         # Combine
         features = np.vstack([cpu_intensive, mem_intensive, net_intensive])
