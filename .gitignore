@@ -39,3 +39,7 @@ test_*.py
 # Temporary
 /tmp/
 *.tmp
+
+# Runtime data
+*.db
+*.sqlite
