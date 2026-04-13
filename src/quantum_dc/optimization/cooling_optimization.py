@@ -48,7 +48,8 @@ class CoolingOptimizer:
                     (self.temp_max - self.temp_min) / (self.num_levels - 1)
                 )
                 # Cooling power inversely proportional to (setpoint - outdoor_temp)
-                cooling_power = heat_loads[zone] / max(temp_setpoint - outdoor_temp, 0.1)
+                temp_diff = temp_setpoint - outdoor_temp
+                cooling_power = heat_loads[zone] / max(temp_diff, 1.0)
                 linear[f"z{zone}_t{level}"] = cooling_power
 
         qp.minimize(linear=linear)
@@ -102,15 +103,17 @@ class CoolingOptimizer:
         except Exception as e:
             # Fallback: greedy approach (maximize setpoint for efficiency)
             setpoints = np.full(num_zones, self.temp_max)
-            total_energy = np.sum(heat_loads / (self.temp_max - outdoor_temp))
+            temp_diff = max(self.temp_max - outdoor_temp, 1.0)
+            total_energy = np.sum(heat_loads / temp_diff)
             method = f'Greedy (fallback: {str(e)[:50]})'
 
-        # Calculate metrics
+        # Calculate metrics — guard against division by zero / negative diffs
+        safe_diffs = np.maximum(setpoints - outdoor_temp, 1.0)
         metrics = {
-            'avg_setpoint': np.mean(setpoints),
-            'setpoint_range': np.max(setpoints) - np.min(setpoints),
-            'total_cooling_power': total_energy,
-            'power_per_zone': heat_loads / (setpoints - outdoor_temp)
+            'avg_setpoint': float(np.mean(setpoints)),
+            'setpoint_range': float(np.max(setpoints) - np.min(setpoints)),
+            'total_cooling_power': float(total_energy),
+            'power_per_zone': (heat_loads / safe_diffs).tolist()
         }
 
         return {
