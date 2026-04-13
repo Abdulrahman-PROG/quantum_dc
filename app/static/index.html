@@ -147,6 +147,96 @@
                 <h3>Event Log</h3>
                 <div id="event-log" class="event-log"></div>
             </div>
+
+            <!-- Quantum vs Classical Benchmark -->
+            <div class="viz-card viz-card-wide">
+                <h3>⚛️ Quantum vs Classical Benchmark</h3>
+                <button id="btn-benchmark" class="btn btn-accent" style="width:auto;margin-bottom:15px;">▶ Run Benchmark</button>
+                <div id="benchmark-results" class="benchmark-grid" style="display:none;">
+                    <div class="benchmark-col" id="bench-greedy">
+                        <h4>Classical Greedy</h4>
+                        <div class="bench-stat"><span>Energy Score</span><strong id="bench-greedy-energy">--</strong></div>
+                        <div class="bench-stat"><span>Time</span><strong id="bench-greedy-time">--</strong></div>
+                        <div class="bench-stat"><span>Avg Utilization</span><strong id="bench-greedy-util">--</strong></div>
+                        <div class="bench-stat"><span>Load Balance</span><strong id="bench-greedy-balance">--</strong></div>
+                        <div class="bench-stat"><span>Tasks Assigned</span><strong id="bench-greedy-tasks">--</strong></div>
+                    </div>
+                    <div class="benchmark-divider">
+                        <div class="improvement-badge" id="bench-improvement">--</div>
+                        <div class="improvement-label">Quantum<br>Improvement</div>
+                    </div>
+                    <div class="benchmark-col" id="bench-qaoa">
+                        <h4>Quantum QAOA</h4>
+                        <div class="bench-stat"><span>Energy Score</span><strong id="bench-qaoa-energy">--</strong></div>
+                        <div class="bench-stat"><span>Time</span><strong id="bench-qaoa-time">--</strong></div>
+                        <div class="bench-stat"><span>Avg Utilization</span><strong id="bench-qaoa-util">--</strong></div>
+                        <div class="bench-stat"><span>Load Balance</span><strong id="bench-qaoa-balance">--</strong></div>
+                        <div class="bench-stat"><span>Tasks Assigned</span><strong id="bench-qaoa-tasks">--</strong></div>
+                    </div>
+                </div>
+                <div id="benchmark-loading" style="display:none;text-align:center;padding:20px;color:var(--text-secondary);">
+                    Running quantum circuit... this may take a few seconds
+                </div>
+            </div>
+        </div>
+
+        <!-- LSTM Energy Forecast -->
+        <div class="visualization-grid" style="margin-top:0;">
+            <div class="viz-card viz-card-wide">
+                <h3>🧠 LSTM Energy Forecast — Predicted vs Actual</h3>
+                <div style="display:flex;align-items:center;gap:15px;margin-bottom:15px;flex-wrap:wrap;">
+                    <button id="btn-forecast" class="btn btn-accent" style="width:auto;">🔮 Run Forecast</button>
+                    <span id="forecast-model-badge" style="font-size:0.85rem;color:var(--text-secondary);"></span>
+                </div>
+                <canvas id="forecast-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- Historical Metrics -->
+        <div class="visualization-grid" style="margin-top:0;">
+            <div class="viz-card viz-card-wide">
+                <h3>📊 Historical Metrics</h3>
+                <div style="display:flex;gap:10px;margin-bottom:15px;flex-wrap:wrap;">
+                    <button id="btn-history" class="btn btn-accent" style="width:auto;">📈 Load History</button>
+                    <a id="btn-export-csv" href="/api/history/export" class="btn btn-secondary" style="text-decoration:none;">⬇ Export CSV</a>
+                </div>
+                <canvas id="history-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- Carbon Footprint Optimizer -->
+        <div class="visualization-grid" style="margin-top:0;">
+            <div class="viz-card viz-card-wide">
+                <h3>🌱 Carbon Footprint Optimizer</h3>
+                <button id="btn-carbon" class="btn btn-accent" style="width:auto;margin-bottom:15px;">🌍 Optimize Carbon Schedule</button>
+                <div id="carbon-results" style="display:none;">
+                    <div class="carbon-summary">
+                        <div class="carbon-stat">
+                            <div class="carbon-stat-label">Naive CO₂</div>
+                            <div class="carbon-stat-value" id="carbon-naive">--</div>
+                            <div class="carbon-stat-unit">g CO₂</div>
+                        </div>
+                        <div class="carbon-arrow">→</div>
+                        <div class="carbon-stat carbon-stat-good">
+                            <div class="carbon-stat-label">Optimized CO₂</div>
+                            <div class="carbon-stat-value" id="carbon-optimal">--</div>
+                            <div class="carbon-stat-unit">g CO₂</div>
+                        </div>
+                        <div class="carbon-arrow">💾</div>
+                        <div class="carbon-stat carbon-stat-best">
+                            <div class="carbon-stat-label">CO₂ Saved</div>
+                            <div class="carbon-stat-value" id="carbon-saved">--</div>
+                            <div class="carbon-stat-unit" id="carbon-savings-pct">--</div>
+                        </div>
+                    </div>
+                    <canvas id="carbon-chart" style="margin-top:20px;"></canvas>
+                    <div class="carbon-legend" style="margin-top:10px;">
+                        <span class="legend-dot" style="background:var(--success-color)"></span> Green hours &nbsp;
+                        <span class="legend-dot" style="background:var(--warning-color)"></span> Neutral &nbsp;
+                        <span class="legend-dot" style="background:var(--danger-color)"></span> Peak carbon
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Footer -->

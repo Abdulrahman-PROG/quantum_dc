@@ -66,12 +66,15 @@ function initializeControls() {
     document.getElementById('btn-reset').addEventListener('click', resetSimulation);
     document.getElementById('btn-optimize').addEventListener('click', runOptimization);
     document.getElementById('optimization-mode').addEventListener('change', updateOptimizationMode);
+    document.getElementById('btn-benchmark').addEventListener('click', runBenchmark);
+    document.getElementById('btn-carbon').addEventListener('click', runCarbonOptimizer);
+    document.getElementById('btn-history').addEventListener('click', loadHistory);
+    document.getElementById('btn-forecast').addEventListener('click', loadForecast);
 }
 
 async function startSimulation() {
     try {
-        const response = await fetch('/api/simulation/start', { method: 'POST' });
-        const data = await response.json();
+        await fetch('/api/simulation/start', { method: 'POST' });
         addEvent('Simulation started', 'success');
         updateSimulationStatus(true);
     } catch (error) {
@@ -82,8 +85,7 @@ async function startSimulation() {
 
 async function stopSimulation() {
     try {
-        const response = await fetch('/api/simulation/stop', { method: 'POST' });
-        const data = await response.json();
+        await fetch('/api/simulation/stop', { method: 'POST' });
         addEvent('Simulation stopped', 'warning');
         updateSimulationStatus(false);
     } catch (error) {
@@ -94,8 +96,7 @@ async function stopSimulation() {
 
 async function resetSimulation() {
     try {
-        const response = await fetch('/api/simulation/reset', { method: 'POST' });
-        const data = await response.json();
+        await fetch('/api/simulation/reset', { method: 'POST' });
         addEvent('Simulation reset', 'info');
         updateSimulationStatus(false);
         loadInitialData();
@@ -504,6 +505,217 @@ function addEvent(message, type = 'info') {
     // Limit event log entries
     while (container.children.length > eventLogMaxEntries) {
         container.removeChild(container.lastChild);
+    }
+}
+
+// LSTM Energy Forecast
+async function loadForecast() {
+    document.getElementById('btn-forecast').disabled = true;
+    try {
+        const response = await fetch('/api/forecast');
+        if (!response.ok) {
+            const err = await response.json();
+            addEvent('Forecast error: ' + err.detail, 'error');
+            return;
+        }
+        const data = await response.json();
+
+        document.getElementById('forecast-model-badge').textContent =
+            `Model: ${data.model}`;
+
+        if (charts.forecast) charts.forecast.destroy();
+
+        const ctx = document.getElementById('forecast-chart').getContext('2d');
+        charts.forecast = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: data.hours.map(h => `${h}:00`),
+                datasets: [
+                    {
+                        label: 'Predicted Energy (kW)',
+                        data: data.predicted,
+                        borderColor: '#00d4ff',
+                        backgroundColor: 'rgba(0,212,255,0.1)',
+                        tension: 0.4,
+                        borderWidth: 2,
+                    },
+                    {
+                        label: 'Actual Energy (kW)',
+                        data: data.actual,
+                        borderColor: '#f59e0b',
+                        backgroundColor: 'rgba(245,158,11,0.1)',
+                        tension: 0.4,
+                        borderWidth: 2,
+                        borderDash: [5, 5],
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { labels: { color: '#f1f5f9' } } },
+                scales: {
+                    x: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } },
+                    y: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' }, beginAtZero: false }
+                }
+            }
+        });
+
+        addEvent(`LSTM forecast complete — model: ${data.model}`, 'success');
+    } catch (error) {
+        addEvent('Forecast failed', 'error');
+        console.error(error);
+    } finally {
+        document.getElementById('btn-forecast').disabled = false;
+    }
+}
+
+// Historical Metrics
+async function loadHistory() {
+    try {
+        const response = await fetch('/api/history?limit=200');
+        const rows = await response.json();
+
+        if (!rows.length) {
+            addEvent('No history yet — start the simulation first', 'warning');
+            return;
+        }
+
+        const labels = rows.map(r => `t${r.sim_time}`);
+        const energy  = rows.map(r => r.total_energy);
+        const cost    = rows.map(r => r.cost_per_hour);
+        const carbon  = rows.map(r => r.carbon_emissions);
+        const util    = rows.map(r => r.server_utilization);
+
+        if (charts.history) charts.history.destroy();
+
+        const ctx = document.getElementById('history-chart').getContext('2d');
+        charts.history = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [
+                    { label: 'Energy (kWh)', data: energy, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.1)', tension: 0.3, yAxisID: 'y' },
+                    { label: 'Cost ($/h)',   data: cost,   borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.1)',  tension: 0.3, yAxisID: 'y' },
+                    { label: 'Carbon (g)',   data: carbon, borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.1)',  tension: 0.3, yAxisID: 'y1' },
+                    { label: 'Utilization (%)', data: util, borderColor: '#00d4ff', backgroundColor: 'rgba(0,212,255,0.1)', tension: 0.3, yAxisID: 'y1' },
+                ]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { labels: { color: '#f1f5f9' } } },
+                scales: {
+                    x:  { ticks: { color: '#94a3b8', maxTicksLimit: 20 }, grid: { color: '#334155' } },
+                    y:  { type: 'linear', position: 'left',  ticks: { color: '#94a3b8' }, grid: { color: '#334155' } },
+                    y1: { type: 'linear', position: 'right', ticks: { color: '#94a3b8' }, grid: { display: false } },
+                }
+            }
+        });
+
+        addEvent(`History loaded — ${rows.length} data points`, 'success');
+    } catch (error) {
+        addEvent('Failed to load history', 'error');
+        console.error(error);
+    }
+}
+
+// Carbon Footprint Optimizer
+async function runCarbonOptimizer() {
+    document.getElementById('btn-carbon').disabled = true;
+    try {
+        const response = await fetch('/api/carbon');
+        const data = await response.json();
+
+        document.getElementById('carbon-naive').textContent = data.naive_co2.toFixed(1);
+        document.getElementById('carbon-optimal').textContent = data.optimal_co2.toFixed(1);
+        document.getElementById('carbon-saved').textContent = data.co2_saved.toFixed(1);
+        document.getElementById('carbon-savings-pct').textContent = `${data.savings_pct.toFixed(1)}% savings`;
+
+        // Build bar chart colored by hour type
+        const colors = Array.from({ length: 24 }, (_, i) => {
+            if (data.green_hours.includes(i)) return 'rgba(16,185,129,0.8)';
+            if (data.peak_hours.includes(i)) return 'rgba(239,68,68,0.8)';
+            return 'rgba(245,158,11,0.8)';
+        });
+
+        if (charts.carbon) {
+            charts.carbon.destroy();
+        }
+        const ctx = document.getElementById('carbon-chart').getContext('2d');
+        charts.carbon = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: Array.from({ length: 24 }, (_, i) => `${i}:00`),
+                datasets: [{
+                    label: 'Carbon Intensity (g CO₂/kWh)',
+                    data: data.carbon_intensity,
+                    backgroundColor: colors,
+                    borderWidth: 0,
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { labels: { color: '#f1f5f9' } } },
+                scales: {
+                    x: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } },
+                    y: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' }, beginAtZero: true }
+                }
+            }
+        });
+
+        document.getElementById('carbon-results').style.display = 'block';
+        addEvent(`Carbon optimizer: ${data.savings_pct.toFixed(1)}% CO₂ reduction possible`, 'success');
+    } catch (error) {
+        addEvent('Carbon optimizer failed', 'error');
+        console.error(error);
+    } finally {
+        document.getElementById('btn-carbon').disabled = false;
+    }
+}
+
+// Quantum vs Classical Benchmark
+async function runBenchmark() {
+    document.getElementById('benchmark-results').style.display = 'none';
+    document.getElementById('benchmark-loading').style.display = 'block';
+    document.getElementById('btn-benchmark').disabled = true;
+
+    try {
+        const response = await fetch('/api/benchmark');
+        const data = await response.json();
+
+        const g = data.results.greedy;
+        const q = data.results.qaoa;
+
+        document.getElementById('bench-greedy-energy').textContent = g.energy.toFixed(4);
+        document.getElementById('bench-greedy-time').textContent = g.time_ms + ' ms';
+        document.getElementById('bench-greedy-util').textContent = (g.avg_utilization * 100).toFixed(1) + '%';
+        document.getElementById('bench-greedy-balance').textContent = g.load_balance.toFixed(3);
+        document.getElementById('bench-greedy-tasks').textContent = g.assigned_tasks;
+
+        if (q && !q.error) {
+            document.getElementById('bench-qaoa-energy').textContent = q.energy.toFixed(4);
+            document.getElementById('bench-qaoa-time').textContent = q.time_ms + ' ms';
+            document.getElementById('bench-qaoa-util').textContent = (q.avg_utilization * 100).toFixed(1) + '%';
+            document.getElementById('bench-qaoa-balance').textContent = q.load_balance.toFixed(3);
+            document.getElementById('bench-qaoa-tasks').textContent = q.assigned_tasks;
+        } else {
+            ['energy','time','util','balance','tasks'].forEach(k => {
+                document.getElementById(`bench-qaoa-${k}`).textContent = q?.error ? 'Error' : '--';
+            });
+        }
+
+        const imp = data.energy_improvement_pct;
+        const badge = document.getElementById('bench-improvement');
+        badge.textContent = (imp >= 0 ? '+' : '') + imp.toFixed(1) + '%';
+        badge.style.background = imp > 0 ? 'var(--success-color)' : 'var(--danger-color)';
+
+        addEvent(`Benchmark done — QAOA ${imp >= 0 ? 'saved' : 'used'} ${Math.abs(imp).toFixed(1)}% energy vs Greedy`, imp >= 0 ? 'success' : 'warning');
+        document.getElementById('benchmark-results').style.display = 'grid';
+    } catch (error) {
+        addEvent('Benchmark failed', 'error');
+        console.error(error);
+    } finally {
+        document.getElementById('benchmark-loading').style.display = 'none';
+        document.getElementById('btn-benchmark').disabled = false;
     }
 }
 

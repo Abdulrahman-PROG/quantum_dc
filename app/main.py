@@ -5,7 +5,7 @@ Real-time monitoring and control interface
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional
@@ -14,6 +14,9 @@ import numpy as np
 from datetime import datetime
 import sys
 import os
+import sqlite3
+import csv
+import io
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -28,6 +31,61 @@ from quantum_dc import (
     DataCenterConfig,
     create_sample_dataset
 )
+
+# ---------------------------------------------------------------------------
+# SQLite historical metrics database
+# ---------------------------------------------------------------------------
+DB_PATH = os.path.join(os.path.dirname(__file__), "metrics_history.db")
+
+def _init_db():
+    con = sqlite3.connect(DB_PATH)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS metrics_log (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            recorded_at      TEXT    NOT NULL,
+            sim_time         INTEGER NOT NULL,
+            hour             INTEGER NOT NULL,
+            total_energy     REAL,
+            average_temp     REAL,
+            cost_per_hour    REAL,
+            carbon_emissions REAL,
+            server_utilization REAL,
+            anomalies_detected INTEGER,
+            optimization_count INTEGER,
+            predicted_energy REAL
+        )
+    """)
+    con.commit()
+    con.close()
+
+_init_db()
+
+def log_metrics(sim_time: int, metrics: dict):
+    """Insert one row into metrics_log."""
+    con = sqlite3.connect(DB_PATH)
+    con.execute("""
+        INSERT INTO metrics_log
+            (recorded_at, sim_time, hour, total_energy, average_temp,
+             cost_per_hour, carbon_emissions, server_utilization,
+             anomalies_detected, optimization_count, predicted_energy)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        datetime.now().isoformat(),
+        sim_time,
+        sim_time % 24,
+        metrics.get("total_energy", 0),
+        metrics.get("average_temp", 0),
+        metrics.get("cost_per_hour", 0),
+        metrics.get("carbon_emissions", 0),
+        metrics.get("server_utilization", 0),
+        metrics.get("anomalies_detected", 0),
+        metrics.get("optimization_count", 0),
+        metrics.get("predicted_energy", 0),
+    ))
+    con.commit()
+    con.close()
+
+# ---------------------------------------------------------------------------
 
 app = FastAPI(title="Quantum Data Center Control", version="1.0.0")
 
@@ -259,63 +317,46 @@ class DataCenterState:
                 self.metrics["anomalies_detected"] += 1
 
         self._update_metrics()
+        log_metrics(self.current_time, self.metrics)
 
     async def run_optimization(self):
-        """Run quantum optimization based on mode"""
+        """Run quantum optimization in a thread pool so it never blocks the event loop."""
         self.metrics["optimization_count"] += 1
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._run_optimization_sync)
 
+    def _run_optimization_sync(self):
+        """Blocking quantum work — called from a thread executor."""
         try:
             if self.optimization_mode in ("qaoa", "auto"):
-                # Task allocation optimization
                 num_tasks = min(4, len(self.tasks))
                 task_loads = [t['cpu_cores'] for t in self.tasks[:num_tasks]]
                 num_servers = min(3, len(self.servers))
                 server_capacities = [s['capacity'] for s in self.servers[:num_servers]]
 
-                # Let the optimizer decide: QAOA if small enough, greedy otherwise
                 result = self.task_optimizer.optimize(
                     task_loads=task_loads,
                     server_capacities=server_capacities,
                 )
-
                 allocation_matrix = result['allocation']
-                task_assignments = []
-                for task_row in allocation_matrix:
-                    server_idx = int(np.argmax(task_row))
-                    task_assignments.append(server_idx)
-
+                task_assignments = [int(np.argmax(row)) for row in allocation_matrix]
                 for i in range(min(len(task_assignments), len(self.current_allocation))):
                     self.current_allocation[i] = task_assignments[i]
 
             elif self.optimization_mode == "vqe":
-                # Workload scheduling
-                workloads = self.timeseries_data['workload_demand']
-                energy_costs = self.timeseries_data['electricity_price']
-                carbon_intensity = self.timeseries_data['carbon_intensity']
-
                 self.workload_scheduler.optimize(
-                    workloads=workloads,
-                    energy_costs=energy_costs,
-                    carbon_intensity=carbon_intensity,
+                    workloads=self.timeseries_data['workload_demand'],
+                    energy_costs=self.timeseries_data['electricity_price'],
+                    carbon_intensity=self.timeseries_data['carbon_intensity'],
                 )
 
             elif self.optimization_mode == "cooling":
-                # Cooling optimization using QUBO
                 hour = self.current_time % 24
                 outdoor_temp = float(self.timeseries_data['outdoor_temp'][hour])
-                heat_loads = np.array([
-                    np.random.uniform(30, 80) for _ in range(self.config.num_zones)
-                ])
-
-                result = self.cooling_optimizer.optimize(
-                    outdoor_temp=outdoor_temp,
-                    heat_loads=heat_loads,
-                )
-
-                # Apply optimal temperature as the average setpoint
+                heat_loads = np.array([np.random.uniform(30, 80) for _ in range(self.config.num_zones)])
+                result = self.cooling_optimizer.optimize(outdoor_temp=outdoor_temp, heat_loads=heat_loads)
                 if 'setpoints' in result:
-                    avg_setpoint = float(np.mean(result['setpoints']))
-                    self.metrics["average_temp"] = avg_setpoint
+                    self.metrics["average_temp"] = float(np.mean(result['setpoints']))
 
         except Exception as e:
             print(f"Optimization error: {e}")
@@ -402,7 +443,38 @@ async def get_status():
         "optimization_mode": state.optimization_mode,
         "num_servers": len(state.servers),
         "num_tasks": len(state.tasks),
-        "num_active_servers": len(set(state.current_allocation))
+        "num_active_servers": len(set(state.current_allocation)),
+        "predictor_model": state.energy_predictor.model_name,
+    }
+
+
+@app.get("/api/forecast")
+async def get_energy_forecast():
+    """
+    Use the trained LSTM to forecast energy for the next 24 hours,
+    then return actual (historical) vs predicted for the chart.
+    """
+    if not state.energy_predictor.is_trained:
+        raise HTTPException(status_code=400, detail="Energy predictor not trained yet")
+
+    ts = state.timeseries_data
+    hours = np.arange(24)
+    workloads = ts['workload_demand']
+    temps     = ts['outdoor_temp']
+    time_feats = hours / 24.0
+
+    X = np.column_stack([workloads, temps, time_feats])
+    predicted = state.energy_predictor.predict(X)
+
+    # Synthetic "actual" energy based on the physics model used at runtime
+    total_capacity = sum(s['capacity'] for s in state.servers)
+    actual = 50 + workloads * 80 + (temps - 20) * 2
+
+    return {
+        "hours": hours.tolist(),
+        "predicted": [round(float(v), 2) for v in predicted],
+        "actual":    [round(float(v), 2) for v in actual],
+        "model":     state.energy_predictor.model_name,
     }
 
 @app.get("/api/servers")
@@ -465,108 +537,75 @@ async def get_timeseries():
         "renewable_percentage": renewable_pct.tolist()
     }
 
+def _run_optimize_sync(request: "OptimizationRequest"):
+    """Blocking optimization work — called from a thread executor."""
+    if request.method in ('qaoa', 'greedy'):
+        task_loads = request.task_loads or [t['cpu_cores'] for t in state.tasks[:6]]
+        server_capacities = request.server_capacities or [s['capacity'] for s in state.servers[:4]]
+
+        result = state.task_optimizer.optimize(task_loads=task_loads, server_capacities=server_capacities)
+        allocation_matrix = result['allocation']
+        task_assignments = [int(np.argmax(row)) for row in allocation_matrix]
+        for i in range(min(len(task_assignments), len(state.current_allocation))):
+            state.current_allocation[i] = task_assignments[i]
+        state._update_metrics()
+        return {
+            "success": True, "method": request.method,
+            "actual_method": result.get('method', 'unknown'),
+            "objective_value": float(result.get('energy', 0.0)),
+            "allocation": task_assignments,
+            "metrics": {"energy": float(result.get('energy', 0.0)), "method_used": result.get('method', 'unknown')},
+            "note": "Optimized subset of tasks due to quantum circuit limitations"
+        }
+
+    elif request.method == 'vqe':
+        result = state.workload_scheduler.optimize(
+            workloads=state.timeseries_data['workload_demand'],
+            energy_costs=state.timeseries_data['electricity_price'],
+            carbon_intensity=state.timeseries_data['carbon_intensity'],
+        )
+        rec = result.get('recommendations', {})
+        return {
+            "success": True, "method": "vqe",
+            "actual_method": result.get('method', 'Classical'),
+            "best_hours": rec.get('best_hours', []),
+            "worst_hours": rec.get('worst_hours', []),
+            "recommendations": {
+                "best_hours": rec.get('best_hours', []),
+                "worst_hours": rec.get('worst_hours', []),
+                "potential_savings_pct": float(rec.get('potential_savings_pct', 0.0)),
+            },
+            "note": f"Scheduling via {result.get('method', 'Classical')}"
+        }
+
+    elif request.method == 'cooling':
+        hour = state.current_time % 24
+        outdoor_temp = float(state.timeseries_data['outdoor_temp'][hour])
+        heat_loads = np.array([np.random.uniform(30, 80) for _ in range(state.config.num_zones)])
+        result = state.cooling_optimizer.optimize(outdoor_temp=outdoor_temp, heat_loads=heat_loads)
+        setpoints = result['setpoints']
+        if isinstance(setpoints, np.ndarray):
+            setpoints = setpoints.tolist()
+        return {
+            "success": True, "method": "cooling",
+            "actual_method": result.get('method', 'QUBO'),
+            "setpoints": setpoints,
+            "total_cost": float(result.get('total_energy', 0.0)),
+            "metrics": result.get('metrics', {}),
+            "note": f"Cooling optimization via {result.get('method', 'QUBO')}"
+        }
+
+    raise ValueError("Invalid optimization method")
+
+
 @app.post("/api/optimize")
 async def run_optimization(request: OptimizationRequest):
-    """Run optimization on demand"""
+    """Run optimization on demand — offloaded to thread pool to keep event loop free."""
     try:
-        if request.method in ('qaoa', 'greedy'):
-            task_loads = request.task_loads or [t['cpu_cores'] for t in state.tasks[:6]]
-            server_capacities = request.server_capacities or [
-                s['capacity'] for s in state.servers[:4]
-            ]
-
-            # Let the optimizer decide QAOA vs greedy based on problem size
-            result = state.task_optimizer.optimize(
-                task_loads=task_loads,
-                server_capacities=server_capacities,
-            )
-
-            allocation_matrix = result['allocation']
-            task_assignments = []
-            for task_row in allocation_matrix:
-                server_idx = int(np.argmax(task_row))
-                task_assignments.append(server_idx)
-
-            # Update allocation for the optimized tasks
-            for i in range(min(len(task_assignments), len(state.current_allocation))):
-                state.current_allocation[i] = task_assignments[i]
-
-            state._update_metrics()
-
-            return {
-                "success": True,
-                "method": request.method,
-                "actual_method": result.get('method', 'unknown'),
-                "objective_value": float(result.get('energy', 0.0)),
-                "allocation": task_assignments,
-                "metrics": {
-                    "energy": float(result.get('energy', 0.0)),
-                    "method_used": result.get('method', 'unknown')
-                },
-                "note": "Optimized subset of tasks due to quantum circuit limitations"
-            }
-
-        elif request.method == 'vqe':
-            # Workload scheduling via the actual WorkloadScheduler
-            workloads = state.timeseries_data['workload_demand']
-            energy_prices = state.timeseries_data['electricity_price']
-            carbon_intensities = state.timeseries_data['carbon_intensity']
-
-            result = state.workload_scheduler.optimize(
-                workloads=workloads,
-                energy_costs=energy_prices,
-                carbon_intensity=carbon_intensities,
-            )
-
-            recommendations = result.get('recommendations', {})
-            potential_savings = recommendations.get('potential_savings_pct', 0.0)
-
-            return {
-                "success": True,
-                "method": "vqe",
-                "actual_method": result.get('method', 'Classical'),
-                "best_hours": recommendations.get('best_hours', []),
-                "worst_hours": recommendations.get('worst_hours', []),
-                "recommendations": {
-                    "best_hours": recommendations.get('best_hours', []),
-                    "worst_hours": recommendations.get('worst_hours', []),
-                    "potential_savings_pct": float(potential_savings),
-                },
-                "note": f"Scheduling via {result.get('method', 'Classical')}"
-            }
-
-        elif request.method == 'cooling':
-            # Cooling optimization via the actual CoolingOptimizer
-            hour = state.current_time % 24
-            outdoor_temp = float(state.timeseries_data['outdoor_temp'][hour])
-            heat_loads = np.array([
-                np.random.uniform(30, 80) for _ in range(state.config.num_zones)
-            ])
-
-            result = state.cooling_optimizer.optimize(
-                outdoor_temp=outdoor_temp,
-                heat_loads=heat_loads,
-            )
-
-            setpoints = result['setpoints']
-            if isinstance(setpoints, np.ndarray):
-                setpoints = setpoints.tolist()
-
-            return {
-                "success": True,
-                "method": "cooling",
-                "actual_method": result.get('method', 'QUBO'),
-                "setpoints": setpoints,
-                "total_cost": float(result.get('total_energy', 0.0)),
-                "metrics": result.get('metrics', {}),
-                "note": f"Cooling optimization via {result.get('method', 'QUBO')}"
-            }
-
-        else:
-            raise HTTPException(status_code=400, detail="Invalid optimization method")
-
-    except HTTPException:
-        raise
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _run_optimize_sync, request)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -584,14 +623,174 @@ async def stop_simulation():
 
 @app.post("/api/simulation/reset")
 async def reset_simulation():
-    """Reset the simulation"""
+    """Reset the simulation and clear history"""
     state.running = False
     state.current_time = 0
     state.initialize_datacenter()
     state._train_ml_models()
     state.metrics["anomalies_detected"] = 0
     state.metrics["optimization_count"] = 0
+    con = sqlite3.connect(DB_PATH)
+    con.execute("DELETE FROM metrics_log")
+    con.commit()
+    con.close()
     return {"status": "reset"}
+
+@app.get("/api/history")
+async def get_history(limit: int = 200):
+    """Return the last N rows of logged metrics for the history chart."""
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    rows = con.execute(
+        "SELECT * FROM metrics_log ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    con.close()
+    rows = list(reversed(rows))  # chronological order
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/history/export")
+async def export_history():
+    """Stream the full metrics log as a CSV download."""
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    rows = con.execute("SELECT * FROM metrics_log ORDER BY id").fetchall()
+    con.close()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    if rows:
+        writer.writerow(rows[0].keys())
+        for row in rows:
+            writer.writerow(list(row))
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=metrics_history.csv"},
+    )
+
+
+@app.get("/api/carbon")
+async def get_carbon_schedule():
+    """
+    Identify the cheapest-carbon hours for running flexible workloads.
+    Returns: per-hour carbon intensity, optimal schedule, total CO2 saved
+    vs naive (uniform) scheduling.
+    """
+    ts = state.timeseries_data
+    carbon = ts['carbon_intensity']          # g CO2/kWh per hour
+    workload = ts['workload_demand']         # 0-1 demand per hour
+    price = ts['electricity_price']          # $/kWh per hour
+    hours = np.arange(len(carbon))
+
+    # Combined cost = carbon + price (normalised)
+    carbon_norm = carbon / carbon.max()
+    price_norm  = price  / price.max()
+    combined_cost = 0.6 * carbon_norm + 0.4 * price_norm
+
+    # Rank hours — lowest combined cost = best to schedule work
+    ranked = np.argsort(combined_cost)
+    n = len(hours)
+    green_hours   = ranked[:n // 3].tolist()
+    neutral_hours = ranked[n // 3: 2 * n // 3].tolist()
+    peak_hours    = ranked[2 * n // 3:].tolist()
+
+    # CO2 saved: shift flexible load (33 % of demand) from peak to green hours
+    flexible_fraction = 0.33
+    naive_co2   = float(np.sum(workload * carbon))
+    shifted_workload = workload.copy()
+    # Move flexible load from peak → green hours proportionally
+    for h in peak_hours:
+        shift = shifted_workload[h] * flexible_fraction
+        shifted_workload[h] -= shift
+        # Distribute evenly among green hours
+        per_green = shift / len(green_hours)
+        for g in green_hours:
+            shifted_workload[g] += per_green
+    optimal_co2 = float(np.sum(shifted_workload * carbon))
+    co2_saved   = naive_co2 - optimal_co2
+    savings_pct = co2_saved / naive_co2 * 100 if naive_co2 > 0 else 0.0
+
+    return {
+        "carbon_intensity": carbon.tolist(),
+        "electricity_price": price.tolist(),
+        "combined_cost": combined_cost.tolist(),
+        "green_hours": green_hours,
+        "neutral_hours": neutral_hours,
+        "peak_hours": peak_hours,
+        "naive_co2": round(naive_co2, 2),
+        "optimal_co2": round(optimal_co2, 2),
+        "co2_saved": round(co2_saved, 2),
+        "savings_pct": round(savings_pct, 2),
+    }
+
+
+def _run_benchmark_sync():
+    """Blocking benchmark — runs QAOA and Greedy, returns result dict."""
+    import time
+
+    # Keep problem small: 3 tasks × 2 servers = 6 qubits (QAOA tractable in ~10s)
+    task_loads = np.array([t['cpu_cores'] for t in state.tasks[:3]])
+    server_capacities = np.array([s['capacity'] for s in state.servers[:2]])
+    results = {}
+
+    # --- Greedy ---
+    t0 = time.perf_counter()
+    greedy_alloc, greedy_energy = state.task_optimizer.solve_greedy(task_loads, server_capacities)
+    greedy_time = time.perf_counter() - t0
+    gm = state.task_optimizer._calculate_metrics(greedy_alloc, task_loads, server_capacities)
+    results['greedy'] = {
+        'energy': float(greedy_energy),
+        'time_ms': round(greedy_time * 1000, 2),
+        'avg_utilization': float(gm['avg_utilization']),
+        'load_balance': float(gm['load_balance']),
+        'assigned_tasks': int(gm['assigned_tasks']),
+    }
+
+    # --- QAOA --- (reps=1, small problem for fast execution)
+    try:
+        # Use a fresh optimizer with low max_iter so benchmark completes in <20s
+        from quantum_dc.optimization.task_allocation import TaskAllocationOptimizer
+        bench_optimizer = TaskAllocationOptimizer(use_quantum=True, max_iter=20)
+        t0 = time.perf_counter()
+        qaoa_alloc, qaoa_energy, _ = bench_optimizer.solve_qaoa(task_loads, server_capacities, reps=1)
+        qaoa_time = time.perf_counter() - t0
+        qm = bench_optimizer._calculate_metrics(qaoa_alloc, task_loads, server_capacities)
+        results['qaoa'] = {
+            'energy': float(qaoa_energy),
+            'time_ms': round(qaoa_time * 1000, 2),
+            'avg_utilization': float(qm['avg_utilization']),
+            'load_balance': float(qm['load_balance']),
+            'assigned_tasks': int(qm['assigned_tasks']),
+        }
+        energy_improvement = (greedy_energy - qaoa_energy) / greedy_energy * 100 if greedy_energy != 0 else 0.0
+    except Exception as e:
+        results['qaoa'] = {'error': str(e)}
+        energy_improvement = 0.0
+
+    return {
+        'results': results,
+        'problem_size': {
+            'num_tasks': len(task_loads),
+            'num_servers': len(server_capacities),
+            'num_qubits': len(task_loads) * len(server_capacities),
+        },
+        'energy_improvement_pct': round(energy_improvement, 2),
+    }
+
+
+@app.get("/api/benchmark")
+async def run_benchmark():
+    """
+    Run the same task-allocation problem with QAOA and Greedy in a thread
+    so the event loop stays responsive while the quantum circuit executes.
+    """
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _run_benchmark_sync)
+    return result
+
 
 @app.post("/api/simulation/config")
 async def update_config(config: SimulationConfig):
