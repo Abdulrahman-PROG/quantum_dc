@@ -4,10 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Quantum Data Center Control</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="stylesheet" href="/static/style.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
+    <!-- Global loading spinner -->
+    <div id="global-spinner" class="global-spinner" style="display:none;">
+        <div class="spinner-box">
+            <div class="spinner-ring"></div>
+            <div class="spinner-label" id="spinner-label">Running quantum circuit…</div>
+        </div>
+    </div>
+
     <div class="container">
         <!-- Header -->
         <header class="header">
@@ -108,6 +117,33 @@
                     <div class="metric-trend" id="trend-optimizations">Quantum</div>
                 </div>
             </div>
+
+            <div class="metric-card">
+                <div class="metric-icon">📊</div>
+                <div class="metric-content">
+                    <div class="metric-label">PUE (Power Usage Effectiveness)</div>
+                    <div class="metric-value" id="metric-pue">1.50</div>
+                    <div class="metric-trend" id="trend-pue">Lower is better</div>
+                </div>
+            </div>
+
+            <div class="metric-card" id="lstm-accuracy-card">
+                <div class="metric-icon">🧠</div>
+                <div class="metric-content">
+                    <div class="metric-label">LSTM Accuracy (R²)</div>
+                    <div class="metric-value" id="metric-lstm-r2">--</div>
+                    <div class="metric-trend" id="metric-lstm-rmse">RMSE: --</div>
+                </div>
+            </div>
+
+            <div class="metric-card" id="anomaly-accuracy-card">
+                <div class="metric-icon">🔍</div>
+                <div class="metric-content">
+                    <div class="metric-label">Anomaly Detector F1</div>
+                    <div class="metric-value" id="metric-anomaly-f1">--</div>
+                    <div class="metric-trend" id="metric-anomaly-acc">Accuracy: --</div>
+                </div>
+            </div>
         </div>
 
         <!-- Visualization Section -->
@@ -177,6 +213,38 @@
                 <div id="benchmark-loading" style="display:none;text-align:center;padding:20px;color:var(--text-secondary);">
                     Running quantum circuit... this may take a few seconds
                 </div>
+                <div id="circuit-section" style="display:none;margin-top:20px;">
+                    <h4 style="color:var(--primary-color);margin-bottom:10px;text-transform:uppercase;letter-spacing:1px;font-size:0.9rem;">QAOA Circuit Diagram</h4>
+                    <pre id="circuit-diagram" class="circuit-diagram"></pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quantum vs Classical SVM Comparison -->
+        <div class="visualization-grid" style="margin-top:0;">
+            <div class="viz-card viz-card-wide">
+                <h3>🔬 Quantum Kernel SVM vs Classical SVM — Anomaly Detection</h3>
+                <div id="svm-comparison" class="benchmark-grid" style="margin-top:10px;">
+                    <div class="benchmark-col">
+                        <h4>Classical RBF-SVM</h4>
+                        <div class="bench-stat"><span>Accuracy</span><strong id="svm-classical-acc">--</strong></div>
+                        <div class="bench-stat"><span>Precision</span><strong id="svm-classical-prec">--</strong></div>
+                        <div class="bench-stat"><span>Recall</span><strong id="svm-classical-rec">--</strong></div>
+                        <div class="bench-stat"><span>F1 Score</span><strong id="svm-classical-f1">--</strong></div>
+                    </div>
+                    <div class="benchmark-divider">
+                        <div class="improvement-badge" id="svm-improvement" style="font-size:1rem;">--</div>
+                        <div class="improvement-label">Quantum<br>F1 Gain</div>
+                    </div>
+                    <div class="benchmark-col">
+                        <h4>Quantum Kernel SVM</h4>
+                        <div class="bench-stat"><span>Accuracy</span><strong id="svm-quantum-acc">--</strong></div>
+                        <div class="bench-stat"><span>Precision</span><strong id="svm-quantum-prec">--</strong></div>
+                        <div class="bench-stat"><span>Recall</span><strong id="svm-quantum-rec">--</strong></div>
+                        <div class="bench-stat"><span>F1 Score</span><strong id="svm-quantum-f1">--</strong></div>
+                    </div>
+                </div>
+                <div id="svm-error" style="display:none;color:var(--warning-color);margin-top:10px;font-size:0.85rem;"></div>
             </div>
         </div>
 
@@ -242,6 +310,11 @@
         <!-- Footer -->
         <footer class="footer">
             <p>Powered by Qiskit Quantum Computing & FastAPI | Real-time Data Center Optimization</p>
+            <p style="margin-top:8px;">
+                <a href="/report" target="_blank" class="btn btn-accent" style="display:inline-block;width:auto;text-decoration:none;padding:8px 20px;">
+                    📄 Open Thesis Report
+                </a>
+            </p>
         </footer>
     </div>
 

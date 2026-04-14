@@ -114,6 +114,9 @@ async function runOptimization() {
         return;
     }
 
+    showSpinner(`Running ${mode.toUpperCase()} optimization…`);
+    document.getElementById('btn-optimize').disabled = true;
+
     try {
         addEvent(`Running ${mode.toUpperCase()} optimization...`, 'info');
 
@@ -134,6 +137,9 @@ async function runOptimization() {
     } catch (error) {
         addEvent('Optimization error', 'error');
         console.error(error);
+    } finally {
+        hideSpinner();
+        document.getElementById('btn-optimize').disabled = false;
     }
 }
 
@@ -170,7 +176,55 @@ function updateSimulationStatus(running) {
 
 // Load Initial Data — run independent fetches in parallel
 async function loadInitialData() {
-    await Promise.all([loadStatus(), loadServersAndTasks(), loadTimeseries()]);
+    await Promise.all([loadStatus(), loadServersAndTasks(), loadTimeseries(), loadModelMetrics()]);
+}
+
+async function loadModelMetrics() {
+    try {
+        const response = await fetch('/api/model-metrics');
+        const data = await response.json();
+
+        // LSTM accuracy card
+        if (data.lstm && data.lstm.r2 !== undefined) {
+            document.getElementById('metric-lstm-r2').textContent = data.lstm.r2.toFixed(4);
+            document.getElementById('metric-lstm-rmse').textContent = `RMSE: ${data.lstm.rmse.toFixed(2)} kW`;
+        }
+
+        // Anomaly detector headline card
+        if (data.anomaly_detector && data.anomaly_detector.f1_score !== undefined) {
+            document.getElementById('metric-anomaly-f1').textContent = data.anomaly_detector.f1_score.toFixed(4);
+            document.getElementById('metric-anomaly-acc').textContent = `Accuracy: ${(data.anomaly_detector.accuracy * 100).toFixed(1)}%`;
+        }
+
+        // Classical vs Quantum SVM comparison panel
+        const cmp = data.anomaly_comparison;
+        if (cmp && cmp.classical) {
+            const c = cmp.classical;
+            document.getElementById('svm-classical-acc').textContent  = (c.accuracy  * 100).toFixed(1) + '%';
+            document.getElementById('svm-classical-prec').textContent = (c.precision * 100).toFixed(1) + '%';
+            document.getElementById('svm-classical-rec').textContent  = (c.recall    * 100).toFixed(1) + '%';
+            document.getElementById('svm-classical-f1').textContent   = c.f1_score.toFixed(4);
+        }
+        if (cmp && cmp.quantum && !cmp.quantum.error) {
+            const q = cmp.quantum;
+            document.getElementById('svm-quantum-acc').textContent  = (q.accuracy  * 100).toFixed(1) + '%';
+            document.getElementById('svm-quantum-prec').textContent = (q.precision * 100).toFixed(1) + '%';
+            document.getElementById('svm-quantum-rec').textContent  = (q.recall    * 100).toFixed(1) + '%';
+            document.getElementById('svm-quantum-f1').textContent   = q.f1_score.toFixed(4);
+
+            const gain = ((q.f1_score - cmp.classical.f1_score) * 100).toFixed(1);
+            const badge = document.getElementById('svm-improvement');
+            badge.textContent = (gain >= 0 ? '+' : '') + gain + '%';
+            badge.style.background = gain >= 0 ? 'var(--success-color)' : 'var(--danger-color)';
+        } else if (cmp && cmp.quantum && cmp.quantum.error) {
+            document.getElementById('svm-error').textContent = 'Quantum kernel: ' + cmp.quantum.error;
+            document.getElementById('svm-error').style.display = 'block';
+            ['acc','prec','rec','f1'].forEach(k =>
+                document.getElementById(`svm-quantum-${k}`).textContent = 'N/A');
+        }
+    } catch (error) {
+        console.error('Failed to load model metrics:', error);
+    }
 }
 
 async function loadStatus() {
@@ -235,6 +289,17 @@ function updateMetrics(metrics) {
     updateMetric('utilization', metrics.server_utilization.toFixed(1), '%');
 
     document.getElementById('metric-optimizations').textContent = metrics.optimization_count;
+
+    if (metrics.pue !== undefined) {
+        const pueEl = document.getElementById('metric-pue');
+        if (pueEl) {
+            pueEl.textContent = metrics.pue.toFixed(3);
+            // Color PUE: green < 1.4, yellow < 1.7, red >= 1.7
+            pueEl.style.color = metrics.pue < 1.4 ? 'var(--success-color)'
+                              : metrics.pue < 1.7 ? 'var(--warning-color)'
+                              : 'var(--danger-color)';
+        }
+    }
 
     // Calculate and display trends
     for (const key in metrics) {
@@ -677,6 +742,7 @@ async function runBenchmark() {
     document.getElementById('benchmark-results').style.display = 'none';
     document.getElementById('benchmark-loading').style.display = 'block';
     document.getElementById('btn-benchmark').disabled = true;
+    showSpinner('Running QAOA quantum circuit…');
 
     try {
         const response = await fetch('/api/benchmark');
@@ -710,13 +776,29 @@ async function runBenchmark() {
 
         addEvent(`Benchmark done — QAOA ${imp >= 0 ? 'saved' : 'used'} ${Math.abs(imp).toFixed(1)}% energy vs Greedy`, imp >= 0 ? 'success' : 'warning');
         document.getElementById('benchmark-results').style.display = 'grid';
+
+        // Show circuit diagram
+        if (data.circuit_diagram) {
+            document.getElementById('circuit-diagram').textContent = data.circuit_diagram;
+            document.getElementById('circuit-section').style.display = 'block';
+        }
     } catch (error) {
         addEvent('Benchmark failed', 'error');
         console.error(error);
     } finally {
         document.getElementById('benchmark-loading').style.display = 'none';
         document.getElementById('btn-benchmark').disabled = false;
+        hideSpinner();
     }
+}
+
+// Global Spinner
+function showSpinner(label = 'Running quantum circuit…') {
+    document.getElementById('spinner-label').textContent = label;
+    document.getElementById('global-spinner').style.display = 'flex';
+}
+function hideSpinner() {
+    document.getElementById('global-spinner').style.display = 'none';
 }
 
 // Utility Functions

@@ -1,241 +1,124 @@
 # Quantum Data Center Optimization
 
-> A web-based platform using quantum computing to optimize data center energy consumption and reduce carbon emissions.
+A graduation project demonstrating quantum-enhanced optimization for data center operations — real-time energy management, anomaly detection, and workload scheduling using Qiskit, PyTorch, and FastAPI.
 
-![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
-![Qiskit](https://img.shields.io/badge/Qiskit-1.3+-purple.svg)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)
-![License](https://img.shields.io/badge/License-Academic-orange.svg)
-
-## What is This?
-
-Data centers consume massive amounts of energy worldwide. This project uses **quantum computing algorithms** to find the best ways to:
-- Assign tasks to servers (minimizing energy use)
-- Schedule workloads when electricity is cheapest and cleanest
-- Optimize cooling systems
-
-The platform includes a **live web dashboard** where you can watch a simulated data center and see quantum optimization in action.
-
-## Quick Start
-
-```bash
-# Clone the repository
-git clone https://github.com/Abdulrahman-PROG/quantum_dc.git
-cd quantum_dc
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Start the web server
-./start.sh        # On Mac/Linux
-# or
-start.bat         # On Windows
-
-# Open your browser
-http://localhost:8000
-```
-
-That's it! The dashboard will show:
-- 10 virtual servers handling tasks in real-time
-- Energy consumption, costs, and carbon emissions
-- Automatic quantum optimization every few minutes
-- Live charts showing how the system performs
+---
 
 ## Features
 
-### Quantum Algorithms
-- **QAOA** (Quantum Approximate Optimization Algorithm) - Assigns tasks to servers optimally
-- **VQE** (Variational Quantum Eigensolver) - Schedules workloads at the best times
-- **QUBO** (Quadratic Unconstrained Binary Optimization) - Finds ideal cooling temperatures
+| Module | Algorithm | Description |
+|--------|-----------|-------------|
+| Task Allocation | **QAOA** (Quantum Approximate Optimization Algorithm) | Assigns tasks to servers to minimize energy consumption |
+| Workload Scheduling | **VQE** (Variational Quantum Eigensolver) | Schedules workloads during low-cost, low-carbon hours |
+| Cooling Optimization | **QUBO** (Quadratic Unconstrained Binary Optimization) | Finds optimal temperature setpoints per zone |
+| Energy Forecasting | **LSTM** (PyTorch, 2-layer) | Predicts next-24h energy consumption from workload + temperature |
+| Anomaly Detection | **Classical SVM** vs **Quantum Kernel SVM** (ZZFeatureMap) | Detects abnormal sensor readings; compares both approaches |
+| Carbon Optimizer | Classical scheduling heuristic | Shifts flexible workloads to green (low-carbon) hours |
 
-### Web Dashboard
-- Real-time simulation of data center operations
-- Interactive controls to start/stop/reset the simulation
-- Visual server rack showing which servers are busy
-- Charts tracking energy use, costs, and environmental impact
-- Manual optimization button to test different quantum algorithms
+---
 
-### Python Library
-Use the optimization algorithms in your own code:
+## Quantum Advantage
 
-```python
-from quantum_dc import TaskAllocationOptimizer
+The benchmark panel runs the same task-allocation problem with:
+- **Classical Greedy** — deterministic, O(n log n)
+- **QAOA** — explores all allocations simultaneously via quantum superposition
 
-# Create optimizer
-optimizer = TaskAllocationOptimizer()
+Results are displayed side-by-side with energy improvement %, execution time, and the actual QAOA circuit diagram.
 
-# Optimize task assignment
-result = optimizer.optimize(
-    task_loads=[10, 25, 50],           # CPU cores needed
-    server_capacities=[100, 150, 200],  # Server capacities
-    method='qaoa'                       # Use quantum algorithm
-)
+---
 
-print(f"Best assignment: {result['allocation']}")
-print(f"Energy used: {result['energy']}")
+## Setup
+
+```bash
+# 1. Create and activate virtualenv
+python3 -m venv venv
+source venv/bin/activate      # Windows: venv\Scripts\activate
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Run the server
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-## How It Works
+Open **http://localhost:8000** in your browser.
 
-The system simulates a data center with:
-- Multiple servers with different capacities
-- Tasks arriving that need to be assigned to servers
-- Energy costs that vary by time of day
-- Carbon intensity of electricity (cleaner at some hours)
+---
 
-**Quantum algorithms** find near-optimal solutions to these complex problems much faster than trying every possibility. While real quantum computers are still developing, this project uses quantum simulation to demonstrate the potential.
+## API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/` | Main dashboard |
+| GET | `/report` | Thesis export page (printable) |
+| GET | `/api/status` | Current simulation state + metrics |
+| GET | `/api/servers` | Server rack status |
+| GET | `/api/tasks` | Task queue with allocation |
+| GET | `/api/timeseries` | 24h energy/carbon/temperature data |
+| POST | `/api/optimize` | Run QAOA / VQE / QUBO / Greedy on demand |
+| GET | `/api/benchmark` | QAOA vs Greedy side-by-side comparison |
+| GET | `/api/forecast` | LSTM 24h energy forecast |
+| GET | `/api/carbon` | Carbon schedule optimizer |
+| GET | `/api/model-metrics` | LSTM R², RMSE + SVM comparison |
+| GET | `/api/history` | Historical metrics log (last 200 steps) |
+| GET | `/api/history/export` | Download full history as CSV |
+| POST | `/api/simulation/start` | Start simulation |
+| POST | `/api/simulation/stop` | Stop simulation |
+| POST | `/api/simulation/reset` | Reset simulation + clear history |
+| WS | `/ws` | Real-time metrics WebSocket |
+
+---
 
 ## Project Structure
 
 ```
-quantum_dc/
+quantumCode/
 ├── app/
-│   ├── main.py              # Web server (FastAPI)
-│   └── static/              # Dashboard (HTML/CSS/JS)
+│   ├── main.py              # FastAPI backend — all endpoints
+│   └── static/
+│       ├── index.html       # Dashboard UI
+│       ├── app.js           # Frontend logic
+│       ├── style.css        # Dark theme styles
+│       └── favicon.svg      # Quantum atom favicon
 ├── src/quantum_dc/
-│   ├── optimization/        # Quantum algorithms
-│   ├── prediction/          # Machine learning
-│   ├── learning/            # Anomaly detection
-│   └── utils/               # Data generation
-├── requirements.txt         # Python dependencies
-├── start.sh / start.bat     # Startup scripts
-└── README.md
+│   ├── optimization/
+│   │   ├── task_allocation.py       # QAOA optimizer
+│   │   ├── workload_scheduling.py   # VQE scheduler
+│   │   └── cooling_optimization.py  # QUBO cooling
+│   ├── prediction/
+│   │   └── energy_predictor.py      # LSTM forecaster (PyTorch)
+│   ├── learning/
+│   │   └── anomaly_detector.py      # Classical + Quantum Kernel SVM
+│   └── utils/
+│       └── data_generator.py        # Synthetic data generation
+└── requirements.txt
 ```
-
-## Technologies Used
-
-- **Qiskit** - IBM's quantum computing framework
-- **FastAPI** - Modern Python web framework
-- **NumPy & SciPy** - Scientific computing
-- **scikit-learn** - Machine learning
-- **Chart.js** - Interactive visualizations
-
-## Use Cases
-
-This research demonstrates quantum computing applications for:
-- **Energy efficiency** in cloud computing
-- **Cost optimization** for data center operators
-- **Carbon reduction** through smart scheduling
-- **Predictive maintenance** using anomaly detection
-
-The techniques could help major data centers (Google, Amazon, Microsoft) reduce their environmental impact while saving money.
-
-## API Reference
-
-Once the server is running, visit http://localhost:8000/docs for interactive API documentation.
-
-**Key Endpoints:**
-- `GET /api/status` - Current data center state
-- `GET /api/servers` - Server information
-- `GET /api/tasks` - Task queue
-- `POST /api/optimize` - Run quantum optimization
-- `POST /api/simulation/start` - Start simulation
-- `POST /api/simulation/step` - Advance one hour
-
-## Requirements
-
-- Python 3.8 or higher
-- 4GB RAM minimum
-- Modern web browser (Chrome, Firefox, Safari, Edge)
-
-**Dependencies:** See `requirements.txt`
-- qiskit >= 1.0.0
-- fastapi >= 0.115.0
-- numpy >= 1.26.0
-- scikit-learn >= 1.3.0
-- Other packages listed in requirements.txt
-
-## Running Experiments
-
-### Watch the Simulation
-
-```bash
-python3 run_simulation.py
-```
-
-This runs a 24-hour simulation showing energy usage and cost changes.
-
-### Compare Optimization Methods
-
-1. Run without optimization:
-   - Set mode to "None" in dashboard
-   - Watch energy consumption
-
-2. Run with QAOA:
-   - Set mode to "QAOA"
-   - See 15-30% energy reduction
-
-### Test API Programmatically
-
-```python
-import requests
-
-# Get current status
-r = requests.get('http://localhost:8000/api/status')
-print(r.json()['metrics'])
-
-# Run optimization
-r = requests.post('http://localhost:8000/api/optimize',
-                  json={'method': 'qaoa'})
-print(r.json())
-```
-
-## Limitations
-
-This is academic research software:
-- Uses quantum **simulation**, not real quantum hardware
-- Simplified data center model (real centers are more complex)
-- Classical fallback algorithms for larger problems (quantum circuits have size limits)
-- No authentication or security features (not for production use)
-
-## Future Work
-
-- Integration with real quantum computers (IBM Quantum, AWS Braket)
-- More sophisticated data center models
-- Reinforcement learning for adaptive optimization
-- Multi-datacenter coordination
-- Real-world validation with actual data center telemetry
-
-## Contributing
-
-This is a graduation project for AI Hybrid Systems.
-
-If you find bugs or have suggestions:
-1. Open an issue on GitHub
-2. Describe the problem clearly
-3. Include error messages if applicable
-
-## License
-
-**Academic/Research Use**
-
-This project is developed for educational and research purposes as part of a graduation project. Free to use for academic work with attribution.
-
-## Authors
-
-Developed as part of AI Hybrid System graduation project.
-
-## Acknowledgments
-
-- Built with IBM's **Qiskit** framework
-- Inspired by research in quantum optimization and green computing
-- Thanks to the open-source quantum computing community
-
-## Citation
-
-If you use this in your research:
-
-```
-Quantum Data Center Optimization Platform
-https://github.com/Abdulrahman-PROG/quantum_dc
-```
-
-## Learn More
-
-- **Qiskit Documentation**: https://qiskit.org/documentation/
-- **QAOA Tutorial**: https://qiskit.org/textbook/ch-applications/qaoa.html
-- **Data Center Efficiency**: https://www.google.com/about/datacenters/efficiency/
 
 ---
 
-**Ready to optimize?** Start the dashboard and watch quantum algorithms reduce energy consumption in real-time! 🚀⚛️
+## Dashboard Panels
+
+1. **Simulation Control** — Start/Stop/Reset + optimization mode selector
+2. **Live Metrics** — Energy, cost, temperature, carbon, PUE, utilization (WebSocket, 1s updates)
+3. **Server Rack** — Visual utilization per server (color-coded: green/yellow/red)
+4. **Task Queue** — Active tasks with server assignments
+5. **Energy & Cost Forecast** — 24h price chart
+6. **Server Load Distribution** — Bar chart per server
+7. **Quantum vs Classical Benchmark** — QAOA vs Greedy with circuit diagram
+8. **Quantum Kernel SVM vs Classical SVM** — Anomaly detection accuracy comparison
+9. **LSTM Energy Forecast** — Predicted vs actual energy chart
+10. **Historical Metrics** — Multi-line chart of full session + CSV export
+11. **Carbon Optimizer** — Hour-by-hour carbon schedule with savings
+12. **Thesis Report** (`/report`) — Printable summary of all results
+
+---
+
+## Requirements
+
+- Python 3.10+
+- Qiskit 1.x + qiskit-algorithms + qiskit-optimization + qiskit-machine-learning
+- PyTorch 2.x
+- scikit-learn, numpy, scipy, pandas
+- FastAPI + uvicorn
+
+See `requirements.txt` for pinned versions.
